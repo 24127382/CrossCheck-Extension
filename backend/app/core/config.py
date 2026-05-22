@@ -1,5 +1,5 @@
 import os
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 class Settings(BaseSettings):
     """Application settings and configuration"""
@@ -28,8 +28,17 @@ class Settings(BaseSettings):
     PORT: int = 8000
     WORKERS: int = 4
     
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
+    # AI Studio Configuration
+    PROJECT_NAME: str = "crosscheck-factcheck"
+    
+    # Đổi thành viết HOA cho đồng bộ với file .env và chuẩn convention
+    AI_STUDIO_KEY: str 
+    
+    # Cấu hình tập trung của Pydantic v2 (Đã xóa class Config cũ)
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore"  # Lời khuyên: Đổi từ "forbid" thành "ignore" để sau này lỡ file .env có thừa biến (ví dụ DB_PASS, v.v.) thì app vẫn chạy mượt không bị crash bất ngờ.
+    )
 
 settings = Settings()

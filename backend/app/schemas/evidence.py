@@ -16,3 +16,11 @@ class EvidenceScore:
     relevance_score: float
     entailment_score: float
     final_score: float
+
+@dataclass
+class FactCheckEvidenceResponse:
+    """Structured response for retreived evidence then 
+    give it to llm to summarize and give verdict (use Evidence
+    """
+    claim: str
+    evidences: List[Evidence]

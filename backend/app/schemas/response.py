@@ -1,6 +1,11 @@
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
+class FactCheckEvidenceResponse(BaseModel):
+    """Evidence item response"""
+    source: str = Field(..., description="Source of the evidence")
+    content: str = Field(..., description="Content of the evidence")
+
 class EvidenceSchema(BaseModel):
     """Evidence item for fact-checking result"""
     source: str = Field(..., description="Source of the evidence")

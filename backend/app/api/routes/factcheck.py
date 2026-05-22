@@ -22,7 +22,8 @@ async def factcheck(request: FactCheckRequestSchema) -> FactCheckResponse:
         - evidences: List of evidence items
     """
     try:
-        result = await factcheck_pipeline.process(request.text, request.context)
+        # result = await factcheck_pipeline.process(request.text, request.context)
+        result = await factcheck_pipeline.run_factcheck_pipeline(request.text)
         return result
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))

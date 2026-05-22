@@ -6,7 +6,9 @@ from app.services.entailment_service import entailment_service
 from app.services.ranking_service import ranking_service
 from app.services.llm_service import llm_service
 from app.services.clip_service import clip_service
-
+# 2 file dưới for test only
+from app.pipelines.llm_service import summarize
+from app.pipelines.retrieve_service import retrieve
 class FactCheckPipeline:
     """Main fact-checking pipeline"""
     
@@ -75,4 +77,29 @@ class FactCheckPipeline:
         
         return response
 
+    async def run_factcheck_pipeline(self, claim: str) -> FactCheckResponse:
+        """Fake pipeline for testing - returns mock results"""
+        # Step 1: Retrieve evidence
+        evidences = await retrieve(claim)
+        
+        # Step 2: Summarize using Gemini
+        llm_result = await summarize(claim, evidences)
+        response = FactCheckResponse(
+            claim=claim,
+            verdict=llm_result["verdict"],        # Lấy kết luận từ Gemini (SUPPORTS/CONTRADICTS/...)
+            confidence=llm_result["confidence"],  # Lấy độ tự tin từ Gemini (ví dụ 0.95)
+            summary=llm_result["summary"],        # Lấy nội dung tóm tắt tiếng Việt
+            evidences=[
+                EvidenceSchema(
+                    source=e.source,
+                    stance="NEUTRAL", # Nếu bạn chưa chạy mô hình RoBERTa phân loại stance thì tạm để NEUTRAL
+                    score=0.0,        # Nếu chưa chạy mô hình rank thì tạm để 0.0
+                    text=e.content
+                )
+                for e in evidences
+            ]
+        )
+        
+        return response
+    
 factcheck_pipeline = FactCheckPipeline()
