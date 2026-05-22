@@ -1,0 +1,33 @@
+{
+  "manifest_version": 3,
+  "name": "CrossCheck - Fact Checker",
+  "version": "0.1.0",
+  "description": "Browser extension for real-time fact-checking of claims",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "storage",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "src/background/index.ts"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/index.ts"]
+    }
+  ],
+  "action": {
+    "default_popup": "src/popup/index.html",
+    "default_title": "CrossCheck - Fact Checker"
+  },
+  "icons": {
+    "16": "public/icons/icon-16.png",
+    "48": "public/icons/icon-48.png",
+    "128": "public/icons/icon-128.png"
+  }
+}
