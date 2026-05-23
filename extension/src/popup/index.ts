@@ -3,28 +3,14 @@ import { factcheckService } from '../services/factcheck';
 
 const app = document.getElementById('app');
 
-async function initializePopup() {
-  console.log('Popup initialized');
-  // const selectedText = await chrome.tabs.executeScript({
-  //   code: `(${getSelectedText.toString()})()`,
-  // });
-  const selectedText = "The Earth is flat";
-  if (selectedText) {
-    const text = selectedText;
-    console.log('Checking claim:', text);
-
-    try {
-      console.log('Calling factcheckService...');
-      const result = await factcheckService.checkClaim(text);
-      console.log('Result received:', result);
-      displayResult(result);
-    } catch (error: any) {
-      console.error('Error:', error);
-      displayError(`Failed to fact-check claim: ${error.message}`);
-    }
-  } else {
-    if (app) app.innerHTML = '<p>Please select text to fact-check</p>';
-  }
+function displayLoading() {
+  if (!app) return;
+  app.innerHTML = `
+    <div class="loading">
+      <div class="spinner"></div>
+      Loading...
+    </div>
+  `;
 }
 
 function displayResult(result: any) {
@@ -43,7 +29,33 @@ function displayResult(result: any) {
 }
 
 function displayError(message: string) {
-  if (app) app.innerHTML = `<p style="color: #d32f2f;">${message}</p>`;
+  if (!app) return;
+  app.innerHTML = `<div class="error-message">${message}</div>`;
+}
+
+async function initializePopup() {
+  // const selectedText = await chrome.tabs.executeScript({
+  //   code: `(${getSelectedText.toString()})()`,
+  // });
+  const selectedText = "The Earth is flat";
+  if (selectedText) {
+    const text = selectedText;
+    displayLoading();
+
+    try {
+      const result = await factcheckService.checkClaim(text);
+      displayResult(result);
+    } catch (error: any) {
+      // Handle network/backend errors gracefully
+      if (error.code === 'ECONNREFUSED' || error.message.includes('Network') || !navigator.onLine) {
+        displayError('Backend unavailable');
+      } else {
+        displayError('Backend unavailable');
+      }
+    }
+  } else {
+    if (app) app.innerHTML = '<p>Please select text to fact-check</p>';
+  }
 }
 
 initializePopup();

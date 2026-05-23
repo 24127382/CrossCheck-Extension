@@ -5,16 +5,30 @@ const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
 export const apiService = {
   async factCheck(request: FactCheckRequest): Promise<FactCheckResponse> {
-    const response = await axios.post<FactCheckResponse>(
-      `${API_BASE_URL}/api/factcheck`,
-      request
-    );
-    return response.data;
+    try {
+      const response = await axios.post<FactCheckResponse>(
+        `${API_BASE_URL}/api/factcheck`,
+        request,
+        { timeout: 30000 }
+      );
+      return response.data;
+    } catch (error: any) {
+      if (error.code === 'ECONNREFUSED' || error.message.includes('ECONNREFUSED')) {
+        throw new Error('Backend unavailable');
+      }
+      throw error;
+    }
   },
 
   async health(): Promise<{ status: string }> {
-    const response = await axios.get(`${API_BASE_URL}/api/health`);
-    return response.data;
+    try {
+      const response = await axios.get(`${API_BASE_URL}/api/health`, {
+        timeout: 5000
+      });
+      return response.data;
+    } catch (error) {
+      throw new Error('Backend unavailable');
+    }
   },
 };
 
