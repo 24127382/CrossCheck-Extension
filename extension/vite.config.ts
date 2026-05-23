@@ -1,5 +1,6 @@
 import { defineConfig } from 'vite';
 import path from 'path';
+import { copyFileSync, mkdirSync, readFileSync, writeFileSync } from 'fs';
 
 export default defineConfig({
   build: {
@@ -20,4 +21,18 @@ export default defineConfig({
       '@': path.resolve(__dirname, './src'),
     },
   },
+  plugins: [
+    {
+      name: 'copy-manifest-and-assets',
+      writeBundle() {
+        mkdirSync('dist', { recursive: true });
+        copyFileSync('manifest.json', 'dist/manifest.json');
+        
+        // Copy popup.html and update script reference
+        let htmlContent = readFileSync('src/popup/index.html', 'utf-8');
+        htmlContent = htmlContent.replace('./index.ts', './popup.js');
+        writeFileSync('dist/popup.html', htmlContent);
+      },
+    },
+  ],
 });

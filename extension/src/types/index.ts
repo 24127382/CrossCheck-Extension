@@ -1,3 +1,12 @@
+// Global declarations
+declare global {
+  namespace NodeJS {
+    interface ProcessEnv {
+      REACT_APP_API_URL?: string;
+    }
+  }
+}
+
 // API Response Types
 export interface FactCheckResponse {
   claim: string;

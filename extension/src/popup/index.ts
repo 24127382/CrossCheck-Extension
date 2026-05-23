@@ -1,20 +1,26 @@
-import { getSelectedText } from '../utils';
+// import { getSelectedText } from '../utils';
 import { factcheckService } from '../services/factcheck';
 
 const app = document.getElementById('app');
 
 async function initializePopup() {
-  const selectedText = await chrome.tabs.executeScript({
-    code: `(${getSelectedText.toString()})()`,
-  });
+  console.log('Popup initialized');
+  // const selectedText = await chrome.tabs.executeScript({
+  //   code: `(${getSelectedText.toString()})()`,
+  // });
+  const selectedText = "The Earth is flat";
+  if (selectedText) {
+    const text = selectedText;
+    console.log('Checking claim:', text);
 
-  if (selectedText && selectedText[0]) {
-    const text = selectedText[0];
     try {
+      console.log('Calling factcheckService...');
       const result = await factcheckService.checkClaim(text);
+      console.log('Result received:', result);
       displayResult(result);
-    } catch (error) {
-      displayError('Failed to fact-check claim');
+    } catch (error: any) {
+      console.error('Error:', error);
+      displayError(`Failed to fact-check claim: ${error.message}`);
     }
   } else {
     if (app) app.innerHTML = '<p>Please select text to fact-check</p>';

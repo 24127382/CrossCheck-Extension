@@ -1,4 +1,4 @@
-import { StorageData, FactCheckHistory, FactCheckResponse } from '../types';
+import { FactCheckHistory, FactCheckResponse } from '../types';
 
 export const storageService = {
   async getHistory(): Promise<FactCheckHistory[]> {
