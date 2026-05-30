@@ -1,6 +1,6 @@
 """Health check endpoints"""
 from fastapi import APIRouter
-from app.schemas.response import HealthResponse
+from ...schemas.response import HealthResponse
 
 router = APIRouter(prefix="/api", tags=["health"])
 

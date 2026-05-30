@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     PROJECT_NAME: str = "crosscheck-factcheck"
     
     # Đổi thành viết HOA cho đồng bộ với file .env và chuẩn convention
-    AI_STUDIO_KEY: str 
+    AI_STUDIO_KEY: str = "" 
     
     # Cấu hình tập trung của Pydantic v2 (Đã xóa class Config cũ)
     model_config = SettingsConfigDict(

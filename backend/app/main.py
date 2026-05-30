@@ -1,9 +1,9 @@
 """Main FastAPI application"""
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from app.core.config import settings
-from app.core.logging import logger
-from app.api.routes import factcheck, health, debug
+from .core.config import settings
+from .core.logging import logger
+from .api.routes import factcheck, health, debug
 
 # Create FastAPI app
 app = FastAPI(
