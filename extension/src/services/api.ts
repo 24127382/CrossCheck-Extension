@@ -1,5 +1,5 @@
 import axios from 'axios';
-import { FactCheckRequest, FactCheckResponse } from '../types';
+import { FactCheckRequest, FactCheckResponse, ExplainResponse } from '../types';
 
 const API_BASE_URL = import.meta.env.VITE_API_URL || 'http://localhost:8000';
 
@@ -13,6 +13,25 @@ export const apiService = {
       );
       return response.data;
     } catch (error: any) {
+      if (error.code === 'ECONNREFUSED' || error.message.includes('ECONNREFUSED')) {
+        throw new Error('Backend unavailable');
+      }
+      throw error;
+    }
+  },
+
+  async explain(claim: string): Promise<ExplainResponse> {
+    try {
+      const response = await axios.post<ExplainResponse>(
+        `${API_BASE_URL}/api/explain`,
+        { claim },
+        { timeout: 30000 }
+      );
+      return response.data;
+    } catch (error: any) {
+      if (error.response?.status === 400) {
+        throw new Error('No cached result found. Please run fact-check first.');
+      }
       if (error.code === 'ECONNREFUSED' || error.message.includes('ECONNREFUSED')) {
         throw new Error('Backend unavailable');
       }

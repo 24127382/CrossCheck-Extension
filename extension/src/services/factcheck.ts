@@ -1,4 +1,4 @@
-import { FactCheckRequest, FactCheckResponse } from '../types';
+import { FactCheckRequest, FactCheckResponse, ExplainResponse } from '../types';
 import { apiService } from './api';
 import { storageService } from './storage';
 
@@ -12,5 +12,9 @@ export const factcheckService = {
     const result = await apiService.factCheck(request);
     await storageService.saveResult(text, result);
     return result;
+  },
+
+  async explainClaim(claim: string): Promise<ExplainResponse> {
+    return await apiService.explain(claim);
   },
 };

@@ -10,15 +10,22 @@ declare global {
 // API Response Types
 export interface FactCheckResponse {
   claim: string;
-  verdict: 'REFUTED' | 'SUPPORTED' | 'NOT_ENOUGH_INFO' | 'DISPUTED';
+  verdict: 'REFUTED' | 'SUPPORTED' | 'NOT_ENOUGH_INFO' | 'DISPUTED' | 'SUPPORTS' | 'CONTRADICTS';
   confidence: number;
   summary: string;
   evidences: Evidence[];
 }
 
+export interface ExplainResponse {
+  claim: string;
+  verdict: string;
+  confidence: number;
+  explanation: string;
+}
+
 export interface Evidence {
   source: string;
-  stance: 'supports' | 'contradicts' | 'neutral';
+  stance: 'supports' | 'contradicts' | 'neutral' | 'NEUTRAL';
   score: number;
   text?: string;
 }
