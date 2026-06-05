@@ -12,15 +12,15 @@ class FactCheckPipeline:
     
     async def process(self, claim: str, context: Optional[str] = None) -> FactCheckResponse:
         """
-        Main pipeline: claim → retrieve → encode → rerank → summarize → response
+        Main pipeline: claim → retrieve → rank → entailment → filter → summarize → response
         
         Flow:
-        1. Retrieve relevant evidence documents
-        2. Encode claim and evidence using embeddings/CLIP
-        3. Compute entailment scores
-        4. Rank evidence by multiple factors
-        5. Generate verdict and summary
-        6. Format response
+        1. Retrieve relevant evidence documents from Wikipedia
+        2. Rank evidence by relevance using embeddings
+        3. Compute entailment scores for ranked evidence
+        4. Filter by combined threshold
+        5. Generate verdict and summary using LLM
+        6. Format and return response
         
         Args:
             claim: The claim to fact-check
@@ -29,90 +29,67 @@ class FactCheckPipeline:
         Returns:
             FactCheckResponse with verdict, confidence, summary, and evidences
         """
-        
-        # Step 1: Retrieve evidence
-        evidences = await retrieval_service.retrieve_evidence(claim, top_k=10)
-        
-        # Step 2: Compute entailment scores
-        entailment_scores = []
-        for evidence in evidences:
-            scores = await entailment_service.compute_entailment(
-                evidence.text, claim
-            )
-            entailment_scores.append(scores)
-        
-        # Step 3: Rank evidence
-        # Combine similarity, entailment, and other factors
-        ranked_evidences = await ranking_service.rank_evidence(claim, evidences)
-        
-        # Step 4: Filter by threshold
-        filtered_evidences = await ranking_service.filter_evidence(ranked_evidences)
-        
-        # Step 5: Generate verdict and summary
-        verdict_result = await llm_service.generate_verdict(
-            claim, 
-            " ".join([e.evidence.text for e in filtered_evidences])
-        )
-        
-        summary = await llm_service.summarize(claim, filtered_evidences)
-        
-        # Step 6: Format response
-        response = FactCheckResponse(
-            claim=claim,
-            verdict=verdict_result.get("verdict", "NOT_ENOUGH_INFO"),
-            confidence=verdict_result.get("confidence", 0.0),
-            summary=summary,
-            evidences=[
-                EvidenceSchema(
-                    source=e.evidence.source,
-                    stance=e.evidence.stance,
-                    score=e.final_score,
-                    text=e.evidence.text
-                )
-                for e in filtered_evidences[:5]
-            ]
-        )
-        
-        return response
-
-    async def run_factcheck_pipeline(self, claim: str) -> FactCheckResponse:
-        """Real pipeline - retrieves from Wikipedia and summarizes with Gemini"""
         try:
             print(f"\n[Pipeline] Starting fact-check for: {claim[:100]}")
             
             # Step 1: Retrieve evidence from Wikipedia
             print("[Pipeline] Step 1: Retrieving evidence from Wikipedia...")
-            try:
-                evidences = await retrieval_service.retrieve_evidence(claim)
-                print(f"[Pipeline] Retrieved {len(evidences)} evidence items")
-                if not evidences:
-                    print("[Pipeline] ⚠️ No evidence retrieved!")
-                    return FactCheckResponse(
-                        claim=claim,
-                        verdict="NOT_ENOUGH_INFO",
-                        confidence=0.0,
-                        summary="Could not find evidence on Wikipedia for this claim.",
-                        evidences=[]
-                    )
-            except Exception as e:
-                print(f"[Pipeline] ❌ Retrieval error: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                raise Exception(f"Failed to retrieve evidence: {str(e)}")
+            evidences = await retrieval_service.retrieve_evidence(claim, top_k=10)
+            print(f"[Pipeline] ✅ Retrieved {len(evidences)} evidence items")
             
-            # Step 2: Summarize using Gemini
-            print("[Pipeline] Step 2: Calling Gemini API for analysis...")
-            try:
-                llm_result = await llm_service.summarize(claim, evidences)
-                print(f"[Pipeline] ✅ Gemini response: {llm_result}")
-            except Exception as e:
-                print(f"[Pipeline] ❌ Gemini error: {str(e)}")
-                import traceback
-                traceback.print_exc()
-                raise Exception(f"Failed to analyze with Gemini: {str(e)}")
+            if not evidences:
+                print("[Pipeline] ⚠️ No evidence retrieved!")
+                return FactCheckResponse(
+                    claim=claim,
+                    verdict="NOT_ENOUGH_INFO",
+                    confidence=0.0,
+                    summary="Could not find evidence on Wikipedia for this claim.",
+                    evidences=[]
+                )
             
-            # Step 3: Format response
-            print("[Pipeline] Step 3: Formatting response...")
+            # Step 2: Rank evidence by relevance
+            print("[Pipeline] Step 2: Ranking evidence by relevance...")
+            ranked_evidences = await ranking_service.rank_evidence(claim, evidences)
+            print(f"[Pipeline] ✅ Ranked evidence")
+            
+            # Step 3: Compute entailment scores
+            print("[Pipeline] Step 3: Computing entailment scores...")
+            entailment_scored = await entailment_service.compute_entailment(claim, evidences)
+            print(f"[Pipeline] ✅ Computed entailment scores")
+            
+            # Merge entailment scores into ranked evidence
+            # Create a mapping for easy lookup
+            entailment_map = {e.evidence.source: e.entailment_score for e in entailment_scored}
+            for scored_evidence in ranked_evidences:
+                source = scored_evidence.evidence.source
+                if source in entailment_map:
+                    # Combine relevance + entailment scores
+                    scored_evidence.entailment_score = entailment_map[source]
+                    scored_evidence.final_score = (scored_evidence.relevance_score + entailment_map[source]) / 2
+            
+            # Step 4: Filter by threshold
+            print("[Pipeline] Step 4: Filtering evidence by threshold...")
+            filtered_evidences = await ranking_service.filter_evidence(ranked_evidences, threshold=0.3)
+            print(f"[Pipeline] ✅ Filtered: {len(ranked_evidences)} → {len(filtered_evidences)}")
+            
+            if not filtered_evidences:
+                print("[Pipeline] ⚠️ No evidence passed threshold!")
+                return FactCheckResponse(
+                    claim=claim,
+                    verdict="NOT_ENOUGH_INFO",
+                    confidence=0.0,
+                    summary="Found evidence but scores too low to use.",
+                    evidences=[]
+                )
+            
+            # Step 5: Summarize using Gemini with top evidence
+            print("[Pipeline] Step 5: Calling Gemini API for analysis...")
+            top_evidences = [e.evidence for e in filtered_evidences[:3]]  # Use top 3 evidences
+            llm_result = await llm_service.summarize(claim, top_evidences)
+            print(f"[Pipeline] ✅ Gemini response: {llm_result}")
+            
+            # Step 6: Format response
+            print("[Pipeline] Step 6: Formatting response...")
             response = FactCheckResponse(
                 claim=claim,
                 verdict=llm_result.get("verdict", "NOT_ENOUGH_INFO"),
@@ -120,12 +97,12 @@ class FactCheckPipeline:
                 summary=llm_result.get("summary", ""),
                 evidences=[
                     EvidenceSchema(
-                        source=e.source,
-                        stance="NEUTRAL",
-                        score=0.0,
-                        text=e.text
+                        source=e.evidence.source,
+                        stance=e.evidence.stance,
+                        score=e.final_score,
+                        text=e.evidence.text
                     )
-                    for e in evidences
+                    for e in filtered_evidences[:5]
                 ]
             )
             print("[Pipeline] ✅ Pipeline complete!")
@@ -136,5 +113,6 @@ class FactCheckPipeline:
             import traceback
             traceback.print_exc()
             raise
+
     
 factcheck_pipeline = FactCheckPipeline()
