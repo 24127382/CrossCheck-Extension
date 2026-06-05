@@ -1,4 +1,4 @@
-"""Entailment service - handles textual entailment"""
+"""Entailment service - handles textual entailment using roberta"""
 
 class EntailmentService:
     """Service for NLI (Natural Language Inference) / Textual Entailment"""

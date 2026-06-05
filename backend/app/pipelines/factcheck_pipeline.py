@@ -6,9 +6,7 @@ from ..services.entailment_service import entailment_service
 from ..services.ranking_service import ranking_service
 from ..services.llm_service import llm_service
 from ..services.clip_service import clip_service
-# 2 file dưới for test only
-from .llm_service import summarize
-from .retrieve_service import retrieve
+from ..schemas.evidence import Evidence
 class FactCheckPipeline:
     """Main fact-checking pipeline"""
     
@@ -85,9 +83,9 @@ class FactCheckPipeline:
             # Step 1: Retrieve evidence from Wikipedia
             print("[Pipeline] Step 1: Retrieving evidence from Wikipedia...")
             try:
-                retrieved_evidences = await retrieve(claim)
-                print(f"[Pipeline] Retrieved {len(retrieved_evidences)} evidence items")
-                if not retrieved_evidences:
+                evidences = await retrieval_service.retrieve_evidence(claim)
+                print(f"[Pipeline] Retrieved {len(evidences)} evidence items")
+                if not evidences:
                     print("[Pipeline] ⚠️ No evidence retrieved!")
                     return FactCheckResponse(
                         claim=claim,
@@ -96,18 +94,6 @@ class FactCheckPipeline:
                         summary="Could not find evidence on Wikipedia for this claim.",
                         evidences=[]
                     )
-                
-                # Convert FactCheckEvidenceResponse to Evidence dataclass for summarize
-                from ..schemas.evidence import Evidence
-                evidences = [
-                    Evidence(
-                        source=e.source,
-                        stance="NEUTRAL",
-                        score=0.0,
-                        text=e.content
-                    )
-                    for e in retrieved_evidences
-                ]
             except Exception as e:
                 print(f"[Pipeline] ❌ Retrieval error: {str(e)}")
                 import traceback
@@ -117,7 +103,7 @@ class FactCheckPipeline:
             # Step 2: Summarize using Gemini
             print("[Pipeline] Step 2: Calling Gemini API for analysis...")
             try:
-                llm_result = await summarize(claim, evidences)
+                llm_result = await llm_service.summarize(claim, evidences)
                 print(f"[Pipeline] ✅ Gemini response: {llm_result}")
             except Exception as e:
                 print(f"[Pipeline] ❌ Gemini error: {str(e)}")
