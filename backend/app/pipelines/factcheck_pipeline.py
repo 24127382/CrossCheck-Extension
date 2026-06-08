@@ -1,9 +1,9 @@
 """Factcheck pipeline - orchestrates the fact-checking flow"""
 from typing import Optional
 from ..schemas.response import FactCheckResponse, EvidenceSchema
-from ..services.retrieval_service import retrieval_service
+from ..services.retrieval_service import retrieval_service, query_builder, wiki_client
 from ..services.entailment_service import entailment_service
-from ..services.ranking_service import ranking_service
+from ..services.ranking_service import ranking_service, sentence_selector
 from ..services.cache_service import cache_service
 from ..schemas.evidence import Evidence
 class FactCheckPipeline:
@@ -31,9 +31,12 @@ class FactCheckPipeline:
         try:
             print(f"\n[Pipeline] Starting fact-check for: {claim[:100]}")
             
-            # Step 1: Retrieve evidence from Wikipedia
-            print("[Pipeline] Step 1: Retrieving evidence from Wikipedia...")
-            evidences = await retrieval_service.retrieve_evidence(claim, top_k=10)
+            # Step 1: noun chunking 
+            print("[Pipeline] Step 1: Extracting topics...")
+            topics = query_builder.extract_topics(claim)
+            # Step 2: Retrieve evidence from Wikipedia
+            print(f"[Pipeline] Step 2: Retrieving evidence for topics: {topics}")
+            evidences = retrieval_service.retrieve(topics)
             print(f"[Pipeline] ✅ Retrieved {len(evidences)} evidence items")
             
             if not evidences:
@@ -46,14 +49,19 @@ class FactCheckPipeline:
                     evidences=[]
                 )
             
-            # Step 2: Rank evidence by relevance
+
             print("[Pipeline] Step 2: Ranking evidence by relevance...")
             ranked_evidences = await ranking_service.rank_evidence(claim, evidences)
-            print(f"[Pipeline] ✅ Ranked evidence")
             
-            # Step 3: Filter by threshold
-            print("[Pipeline] Step 3: Filtering evidence by threshold...")
-            filtered_evidences = await ranking_service.filter_evidence(ranked_evidences, threshold=0.3)
+            # Step 3: Tự lọc tại chỗ (thay cho hàm filter_evidence cũ)
+            filtered_evidences = [e for e in ranked_evidences if e.final_score >= 0.3]
+            if not filtered_evidences and ranked_evidences:
+                filtered_evidences = ranked_evidences[:2]
+                
+            if not filtered_evidences and ranked_evidences:
+                print("[Pipeline] ⚠️ Threshold quá cao! Lấy tạm Top 2 kết quả tốt nhất...")
+                filtered_evidences = ranked_evidences[:2]
+            
             print(f"[Pipeline] ✅ Filtered: {len(ranked_evidences)} → {len(filtered_evidences)}")
             
             if not filtered_evidences:
@@ -65,39 +73,62 @@ class FactCheckPipeline:
                     summary="",
                     evidences=[]
                 )
-            
-            # Step 4: Use RoBERTa to predict verdict
-            print("[Pipeline] Step 4: Running RoBERTa prediction...")
-            top_evidences = [e.evidence for e in filtered_evidences[:5]]  # Use top 5 evidences
-            verdict_result = await entailment_service.predict_verdict(claim, top_evidences)
+            # Step 4: filter evidence by top-k (e.g., top 5 documents)
+            print("[Pipeline] Step 4: Selecting top-k documents...")
+            top_evidences = [e.evidence for e in filtered_evidences[:5]]
+            # Step 5: Tách câu và lấy Top N câu liên quan nhất từ tất cả các Document
+            print("[Pipeline] Step 5: Extracting and ranking sentences...")
+            # LƯU Ý: Truyền thẳng mảng top_evidences vào, không dùng list comprehension!
+            clean_sentence_evidences = sentence_selector.select(
+                evidences=top_evidences,
+                top_n=1
+            )
+
+            # Nếu không trích xuất được câu nào, fallback trả lỗi
+            if not clean_sentence_evidences:
+                return FactCheckResponse(
+                    claim=claim,
+                    verdict="NOT_ENOUGH_INFO",
+                    confidence=0.0,
+                    summary="",
+                    evidences=[]
+                )
+
+            best_sentence = clean_sentence_evidences[0].text
+            print("[Pipeline] Step 6: Running RoBERTa prediction on pure sentences...")
+            verdict_result = await entailment_service.predict_verdict(
+                claim=claim,
+                pseudo_outline=best_sentence
+            )
             print(f"[Pipeline] ✅ RoBERTa verdict: {verdict_result['verdict']} (confidence: {verdict_result['confidence']:.3f})")
             
-            # Step 5: Format response (no summary)
-            print("[Pipeline] Step 5: Formatting response...")
+            
+            # Step 7: Format response - Trả về những câu ngắn đã dùng để user dễ đọc
+            print("[Pipeline] Step 7: Formatting response...")
             response = FactCheckResponse(
                 claim=claim,
                 verdict=verdict_result.get("verdict", "NOT_ENOUGH_INFO"),
                 confidence=verdict_result.get("confidence", 0.0),
-                summary="",  # No summary - RoBERTa only provides verdict
+                summary=best_sentence,
                 evidences=[
                     EvidenceSchema(
-                        source=e.evidence.source,
-                        stance=e.evidence.stance,
-                        score=e.final_score,
-                        text=e.evidence.text
+                        source=e.source,
+                        stance=e.stance,
+                        score=e.score,
+                        text=e.text
                     )
-                    for e in filtered_evidences[:5]
+                    for e in clean_sentence_evidences
                 ]
             )
             
-            # Step 6: Cache result for later explanation
-            print("[Pipeline] Step 6: Caching result...")
-            cache_service.save(
-                claim=claim,
-                verdict=response.verdict,
-                confidence=response.confidence,
-                evidences=top_evidences
-            )
+            # Step 8: Cache result for later explanation
+            print("[Pipeline] Step 8: Caching result...")
+            # cache_service.save(
+            #     claim=claim,
+            #     verdict=response.verdict,
+            #     confidence=response.confidence,
+            #     evidences=clean_sentence_evidences # Cache luôn câu ngắn cho gọn DB
+            # )
             
             print("[Pipeline] ✅ Pipeline complete!")
             return response

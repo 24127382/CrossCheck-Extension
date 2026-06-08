@@ -1,68 +1,69 @@
-"""Ranking service - handles evidence ranking by using all-MiniLM-L6-v2 embeddings and other factors"""
 from typing import List
+import re
 from sentence_transformers import SentenceTransformer, util
 from ..schemas.evidence import Evidence, EvidenceScore
 
 class RankingService:
-    """Service for ranking and filtering evidence"""
+    """Service for ranking and filtering evidence at both Document and Sentence levels"""
     
     def __init__(self):
-        # Initialize embedding model for relevance scoring
         self.model = SentenceTransformer('all-MiniLM-L6-v2')
-    
-    async def rank_evidence(self, claim: str, evidences: List[Evidence]) -> List[EvidenceScore]:
-        """
-        Rank evidence by relevance using embeddings (all-MiniLM-L6-v2)
         
-        Args:
-            claim: The claim to evaluate
-            evidences: List of candidate evidence items
-            
-        Returns:
-            Ranked list of EvidenceScore objects sorted by relevance
-        """
-        print(f"[Ranking] Computing embeddings for claim and {len(evidences)} evidences...")
-        
-        # Encode claim
-        claim_embedding = self.model.encode(claim, convert_to_tensor=True)
-        
-        # Encode all evidence texts
-        evidences_embeddings = [self.model.encode(e.text, convert_to_tensor=True) for e in evidences]
+    def _split_into_sentences(self, text: str) -> List[str]:
+        """Tách câu thông minh hơn dùng Regex, hạn chế lỗi khi gặp U.S., $1.5, ..."""
+        # Tách theo dấu chấm, chấm hỏi, chấm than nếu có khoảng trắng theo sau
+        sentences = re.split(r'(?<=[.!?])\s+', text)
+        cleaned = []
+        for s in sentences:
+            s_clean = s.strip()
+            # Chỉ giữ câu có độ dài hợp lý (bỏ qua câu quá ngắn hoặc rác văn bản)
+            if len(s_clean) > 15:
+                cleaned.append(s_clean)
+        return cleaned
 
-        # Compute cosine similarity scores
-        cosine_scores = [util.cos_sim(claim_embedding, e_emb)[0][0].item() for e_emb in evidences_embeddings]
-        
-        print(f"[Ranking] Cosine scores: {[f'{s:.3f}' for s in cosine_scores]}")
-        
-        results = []
-        for i, relevance_score in enumerate(cosine_scores):
-            evidence_score = EvidenceScore(
+    async def rank_evidence(self, claim: str, evidences: List[Evidence]) -> List[EvidenceScore]:
+        claim_emb = self.model.encode(claim, convert_to_tensor=True)
+        doc_embs = self.model.encode([e.text for e in evidences], convert_to_tensor=True)
+
+        scores = util.cos_sim(claim_emb, doc_embs)[0].tolist()
+
+        ranked = []
+        for i, s in enumerate(scores):
+            evidences[i].score = s
+            ranked.append(EvidenceScore(
                 evidence=evidences[i],
-                relevance_score=relevance_score,
-                entailment_score=0.0,  # Placeholder - can be computed by entailment_service later
-                final_score=relevance_score  # For now, use relevance_score as final_score
-            )
-            results.append(evidence_score)
+                relevance_score=s,
+                entailment_score=0.0,  # Placeholder, sẽ tính sau
+                final_score=s  # Hiện tại chỉ dùng relevance score để xếp hạng
+            ))
+        return sorted(ranked, key=lambda x: x.final_score, reverse=True)
+
+class SentenceSelector:
+    def __init__(self):
+        self.model = SentenceTransformer("all-MiniLM-L6-v2")
+    def split(self, text: str):
+        return [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s) > 15]
+
+    def select(self, evidences: list[Evidence], top_n=1):
+        scored = []
+        all_sentences = []
+        sentence_metadata = []
         
-        # Sort by final score (highest first)
-        sorted_results = sorted(results, key=lambda x: x.final_score, reverse=True)
-        print(f"[Ranking] Top 3 scores after ranking: {[f'{r.final_score:.3f}' for r in sorted_results[:3]]}")
-        return sorted_results
-    
-    async def filter_evidence(self, scored_evidences: List[EvidenceScore], 
-                            threshold: float = 0.3) -> List[EvidenceScore]:
-        """
-        Filter evidence by confidence threshold
+        # Thu thập tất cả câu
+        for e in evidences:
+            for s in self.split(e.text):
+                all_sentences.append(s)
+                sentence_metadata.append((s, e.source))
         
-        Args:
-            scored_evidences: List of ranked evidence scores
-            threshold: Minimum score to keep evidence (0.0 to 1.0)
-            
-        Returns:
-            Filtered list of EvidenceScore objects above threshold
-        """
-        filtered = [e for e in scored_evidences if e.final_score >= threshold]
-        print(f"[Ranking] Filtered: {len(scored_evidences)} → {len(filtered)} (threshold: {threshold})")
-        return filtered
+        # Batch encode cùng lúc - DON'T convert to tensor, use numpy arrays instead
+        embeddings = self.model.encode(all_sentences, convert_to_tensor=False)
+        
+        # Ghép kết quả - scores are now numpy arrays/floats, not tensors
+        scored = [(s, meta[1], float(score.sum()) if hasattr(score, 'sum') else score) 
+                for s, meta, score in zip(all_sentences, sentence_metadata, embeddings)]
+        
+        scored = sorted(scored, key=lambda x: x[2], reverse=True)
+        return [Evidence(text=s[0], source=s[1]) for s in scored[:top_n]]
 
 ranking_service = RankingService()
+sentence_selector = SentenceSelector()

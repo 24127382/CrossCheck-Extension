@@ -5,8 +5,8 @@ from typing import List
 class Evidence:
     """Evidence item structure"""
     source: str
-    stance: str  # 'supports', 'contradicts', 'neutral'
-    score: float
+    stance: str = "neutral"  # 'supports', 'contradicts', 'neutral'
+    score: float = 0.0
     text: str = ""
 
 @dataclass

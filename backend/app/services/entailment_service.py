@@ -45,7 +45,7 @@ class EntailmentService:
                     return_tensors="pt",
                     truncation=True,
                     padding=True,
-                    max_length=512
+                    max_length=512 # maybe this is too short ?
                 )
                 
                 # Run model inference
@@ -75,91 +75,79 @@ class EntailmentService:
         print(f"[Entailment] ✅ Computed entailment for {len(results)}/{len(evidence_list)} evidences")
         return results
     
-    async def predict_verdict(self, claim: str, evidence_list: List[Evidence]) -> dict:
-        """
-        Predict verdict and confidence based on entailment scores
-        
-        Args:
-            claim: The claim being fact-checked
-            evidence_list: List of Evidence objects
-            
-        Returns:
-            Dict with verdict, confidence, and entailment scores
-        """
+    async def predict_verdict(self, claim: str, pseudo_outline: str) -> dict:
+
         print(f"[Entailment] Predicting verdict for claim: {claim[:80]}...")
-        
-        if not evidence_list:
-            return {
-                "verdict": "NOT_ENOUGH_INFO",
-                "confidence": 0.0,
-                "entailment_scores": []
-            }
-        
-        entailment_scores = []
-        
-        for evidence in evidence_list:
-            try:
-                inputs = self.tokenizer(
-                    claim,
-                    evidence.text,
-                    return_tensors="pt",
-                    truncation=True,
-                    padding=True,
-                    max_length=512
+
+        try:
+            combined_input = f"{claim} </s> {pseudo_outline}"
+
+            inputs = self.tokenizer(
+                combined_input,
+                return_tensors="pt",
+                truncation=True,
+                padding=True,
+                max_length=512
+            )
+
+            with torch.no_grad():
+                outputs = self.model(
+                    input_ids=inputs["input_ids"],
+                    attention_mask=inputs["attention_mask"]
                 )
-                
-                with torch.no_grad():
-                    outputs = self.model(**inputs)
-                    logits = outputs.logits
-                    probabilities = torch.softmax(logits, dim=1).cpu().numpy()[0]
-                
-                # probabilities: [contradiction, neutral, entailment]
-                contradiction_score = float(probabilities[0])
-                neutral_score = float(probabilities[1])
-                entailment_score = float(probabilities[2])
-                
-                entailment_scores.append({
-                    "source": evidence.source,
+
+            logits = outputs.logits
+
+            probabilities = torch.softmax(
+                logits,
+                dim=1
+            ).cpu().numpy()[0]
+
+            entailment_score = float(probabilities[0])
+            contradiction_score = float(probabilities[1])
+            neutral_score = float(probabilities[2])
+
+            print(
+                f"[Entailment] Scores -> "
+                f"E={entailment_score:.3f} "
+                f"C={contradiction_score:.3f} "
+                f"N={neutral_score:.3f}"
+            )
+
+            if entailment_score > contradiction_score and entailment_score > neutral_score:
+                verdict = "SUPPORTS"
+                confidence = entailment_score
+
+            elif contradiction_score > entailment_score and contradiction_score > neutral_score:
+                verdict = "CONTRADICTS"
+                confidence = contradiction_score
+
+            else:
+                verdict = "NOT_ENOUGH_INFO"
+                confidence = neutral_score
+
+            print(
+                f"[Entailment] ✅ Predicted verdict: "
+                f"{verdict} ({confidence:.3f})"
+            )
+
+            return {
+                "verdict": verdict,
+                "confidence": confidence,
+                "scores": {
+                    "entailment": entailment_score,
                     "contradiction": contradiction_score,
-                    "neutral": neutral_score,
-                    "entailment": entailment_score
-                })
-                
-            except Exception as e:
-                print(f"[Entailment] ❌ Error predicting for '{evidence.source}': {str(e)}")
-                continue
-        
-        # Aggregate scores across all evidences
-        if not entailment_scores:
+                    "neutral": neutral_score
+                }
+            }
+
+        except Exception as e:
+            print(f"[Entailment] ❌ Error: {str(e)}")
+
             return {
                 "verdict": "NOT_ENOUGH_INFO",
                 "confidence": 0.0,
-                "entailment_scores": []
+                "scores": {}
             }
-        
-        avg_entailment = sum(s["entailment"] for s in entailment_scores) / len(entailment_scores)
-        avg_contradiction = sum(s["contradiction"] for s in entailment_scores) / len(entailment_scores)
-        avg_neutral = sum(s["neutral"] for s in entailment_scores) / len(entailment_scores)
-        
-        print(f"[Entailment] Aggregated scores: entail={avg_entailment:.3f}, contra={avg_contradiction:.3f}, neutral={avg_neutral:.3f}")
-        
-        # Determine verdict based on highest score
-        if avg_entailment > avg_contradiction and avg_entailment > avg_neutral:
-            verdict = "SUPPORTS"
-            confidence = avg_entailment
-        elif avg_contradiction > avg_entailment and avg_contradiction > avg_neutral:
-            verdict = "CONTRADICTS"
-            confidence = avg_contradiction
-        else:
-            verdict = "NOT_ENOUGH_INFO"
-            confidence = avg_neutral
-        
-        print(f"[Entailment] ✅ Predicted verdict: {verdict} (confidence: {confidence:.3f})")
-        
-        return {
-            "verdict": verdict,
-            "confidence": confidence,
-            "entailment_scores": entailment_scores
-        }
 
 entailment_service = EntailmentService()
