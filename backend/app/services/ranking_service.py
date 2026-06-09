@@ -1,6 +1,6 @@
 from typing import List
 import re
-from sentence_transformers import SentenceTransformer, util
+from sentence_transformers import CrossEncoder, SentenceTransformer, util
 from ..schemas.evidence import Evidence, EvidenceScore
 
 class RankingService:
@@ -8,6 +8,8 @@ class RankingService:
     
     def __init__(self):
         self.model = SentenceTransformer('all-MiniLM-L6-v2')
+        # FIX: Liên kết và tái sử dụng toàn cục instance sentence_selector cho cross-encoder scoring
+        self.sentence_selector = sentence_selector
         
     def _split_into_sentences(self, text: str) -> List[str]:
         """Tách câu thông minh hơn dùng Regex, hạn chế lỗi khi gặp U.S., $1.5, ..."""
@@ -30,40 +32,81 @@ class RankingService:
         ranked = []
         for i, s in enumerate(scores):
             evidences[i].score = s
+            
+            # FIX: Tích hợp tín hiệu điểm cấp câu bằng Cross-Encoder (SentenceSelector)
+            try:
+                sent_scores = self.sentence_selector.select(claim, [evidences[i]])
+                sentence_score = max([x.score for x in sent_scores]) if sent_scores else 0.0
+            except:
+                sentence_score = 0.0
+
             ranked.append(EvidenceScore(
                 evidence=evidences[i],
                 relevance_score=s,
-                entailment_score=0.0,  # Placeholder, sẽ tính sau
-                final_score=s  # Hiện tại chỉ dùng relevance score để xếp hạng
+                sentence_score=sentence_score,
+                entailment_score=0.0,
+                final_score=s  # updated sau ở aggregation layer (scoring module)
             ))
         return sorted(ranked, key=lambda x: x.final_score, reverse=True)
 
 class SentenceSelector:
     def __init__(self):
-        self.model = SentenceTransformer("all-MiniLM-L6-v2")
-    def split(self, text: str):
-        return [s.strip() for s in re.split(r'(?<=[.!?])\s+', text) if len(s) > 15]
+        # Cross-encoder reranker (lightweight, production friendly)
+        self.model = CrossEncoder("cross-encoder/ms-marco-MiniLM-L-6-v2")
 
-    def select(self, evidences: list[Evidence], top_n=1):
-        scored = []
-        all_sentences = []
-        sentence_metadata = []
-        
-        # Thu thập tất cả câu
+    def split(self, text: str):
+        return [
+            s.strip()
+            for s in re.split(r'(?<=[.!?])\s+', text)
+            if len(s.strip()) > 15
+        ]
+
+    def select(self, claim: str, evidences: List[Evidence], top_n=3):
+        candidates = []
+        metadata = []
+
+        # 1. collect sentences
         for e in evidences:
             for s in self.split(e.text):
-                all_sentences.append(s)
-                sentence_metadata.append((s, e.source))
-        
-        # Batch encode cùng lúc - DON'T convert to tensor, use numpy arrays instead
-        embeddings = self.model.encode(all_sentences, convert_to_tensor=False)
-        
-        # Ghép kết quả - scores are now numpy arrays/floats, not tensors
-        scored = [(s, meta[1], float(score.sum()) if hasattr(score, 'sum') else score) 
-                for s, meta, score in zip(all_sentences, sentence_metadata, embeddings)]
-        
-        scored = sorted(scored, key=lambda x: x[2], reverse=True)
-        return [Evidence(text=s[0], source=s[1]) for s in scored[:top_n]]
+                candidates.append(s)
+                metadata.append(e.source)
 
-ranking_service = RankingService()
+        if not candidates:
+            return []
+
+        # 2. build cross-encoder pairs
+        pairs = [(claim, sent) for sent in candidates]
+
+        # 3. predict relevance scores
+        scores = self.model.predict(pairs)
+
+        # 4. rank
+        ranked = sorted(
+            zip(candidates, metadata, scores),
+            key=lambda x: x[2],
+            reverse=True
+        )
+
+        # 5. return top-N
+        return [
+            Evidence(text=s, source=src, score=float(score))
+            for s, src, score in ranked[:top_n]
+        ]
+        
+        
+def compute_final_score(relevance, sentence_score, entailment):
+    # FIX: Giới hạn (clamp) dữ liệu đầu vào để tránh score bùng nổ vượt ngưỡng chuẩn 0-1
+    relevance = max(0.0, min(relevance, 1.0))
+    sentence_score = max(0.0, min(sentence_score, 1.0))
+    entailment = max(0.0, min(entailment, 1.0))
+
+    # Đảm bảo tính gộp điểm ổn định cho FEVER eval consistency
+    return (
+        0.3 * relevance +
+        0.3 * sentence_score +
+        0.4 * entailment
+    )
+
+# Lưu ý khởi tạo đúng thứ tự: selector trước để service gán được thuộc tính trong __init__
 sentence_selector = SentenceSelector()
+ranking_service = RankingService()

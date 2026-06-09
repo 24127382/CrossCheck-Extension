@@ -1,12 +1,10 @@
 """Retrieval service - handles evidence retrieval from Wikipedia"""
-from typing import List
-import requests
 import spacy
-from fastapi import HTTPException
+from typing import List, Optional
 from ..schemas.evidence import Evidence
-from ..schemas.response import FactCheckEvidenceResponse
-from ..schemas import response
-
+from hybrid_retrieval import HybridRetrieval  
+from wikipedia_client import WikipediaClient, wiki_client  # Import một chiều từ hạ tầng    
+from entity_linker import EntityLinker, entity_linker  # Import một chiều từ hạ tầng
 # Load spacy model for NER
 try:
     nlp = spacy.load("en_core_web_lg")
@@ -14,117 +12,131 @@ except OSError:
     print("Spacy model not found. Please run: python -m spacy download en_core_web_lg")
     nlp = None
 
-class WikipediaClient:
-    """Client for interacting with Wikipedia API"""
-    
-    def search(self, query: str):
-        HEADERS = {
-            "User-Agent": (
-                "CrossCheckExtension/1.0 "
-                "(https://github.com/yourname/crosscheck; your@email.com)"
-            )
-        }
-        url = "https://en.wikipedia.org/w/api.php"
-        params = {
-            "action": "query",
-            "list": "search",
-            "srsearch": query,
-            "format": "json"
-        }
-        response = requests.get(url, params=params, headers=HEADERS, timeout=10)
-        
-        print("\n========== DEBUG ==========")
-        print("QUERY:", query)
-        print("STATUS:", response.status_code)
-        print("CONTENT-TYPE:", response.headers.get("content-type"))
-        print("BODY:")
-        print(response.text[:1000])
-        print("===========================\n")
-        return response.json()
-
-    def extract(self, title: str):
-        HEADERS = {
-            "User-Agent": (
-                "CrossCheckExtension/1.0 "
-                "(https://github.com/yourname/crosscheck; your@email.com)"
-            )
-        }
-        url = "https://en.wikipedia.org/w/api.php"
-        
-        params = {
-            "action": "query",
-            "prop": "extracts",
-            "explaintext": True,
-            "titles": title,
-            "format": "json"
-        }
-        response = requests.get(url, params=params, headers=HEADERS, timeout=10)
-        print("\n========== EXTRACT DEBUG ==========")
-        print("TITLE:", title)
-        print("STATUS:", response.status_code)
-        print("CONTENT-TYPE:", response.headers.get("content-type"))
-        print("BODY:")
-        print(response.text[:1000])
-        print("===========================\n")
-        return response.json()
-
 class QueryBuilder:
-    def __init__(self):
-        self.nlp = spacy.load("en_core_web_lg")
+    def __init__(self, linker: EntityLinker = None):
+        try:
+            self.nlp = spacy.load("en_core_web_lg")
+        except:
+            self.nlp = None
+        self.linker = linker
 
     def extract_topics(self, text: str):
-        doc = self.nlp(text) if self.nlp else None
-
-        if not doc:
+        if not self.nlp:
             return [text]
 
-        entities = [ent.text for ent in doc.ents]
-        nouns = [c.text for c in doc.noun_chunks]
+        doc = self.nlp(text)
+        linked_entities = []
+
+        if self.linker:
+            mentions = self.linker.extract_mentions(doc)
+            for m in mentions:
+                linked = self.linker.link(m)
+                if linked:
+                    linked_entities.append(linked)
+
+        noun_chunks = [chunk.text for chunk in doc.noun_chunks if len(chunk.text) > 2]
+        candidates = linked_entities + noun_chunks
+        candidates.append(text)
 
         seen = set()
         result = []
+        for q in candidates:
+            if not q:
+                continue
+            q_low = q.lower().strip()
+            if q_low not in seen and len(q) > 2:
+                seen.add(q_low)
+                result.append(q)
 
-        for t in entities + nouns:
-            if t.lower() not in seen:
-                result.append(t)
-                seen.add(t.lower())
+        return result[:8]
 
-        return result[:5]
 
 class RetrievalService:
-    def __init__(self):
-        self.client = WikipediaClient()
+    def __init__(self, client: WikipediaClient, linker: EntityLinker):
+        self.client = client
+        self.linker = linker
+        self.hybrid = HybridRetrieval()  # 🔥 Khởi tạo Hybrid Engine
 
-    def retrieve(self, topics):
-        evidences = []
+    def retrieve(self, topics: List[str], entity_links: Optional[List[str]] = None) -> List[Evidence]:
+        all_docs = []
+        seen = set()
 
-        for topic in topics:
+        # Tạo bản sao tránh biến đổi list gốc
+        expanded_topics = list(topics)
+        if topics:
+            expanded_topics.append(" ".join(topics))
+            expanded_topics.append(topics[0] + " wikipedia")
+
+        for topic in expanded_topics:
             search = self.client.search(topic)
             results = search.get("query", {}).get("search", [])
 
             if not results:
                 continue
 
-            best = max(
-                results,
-                key=lambda x: x.get("size", 0) 
-            )
-            
-            title = best["title"]
-            extract = self.client.extract(title)
+            for r in results[:5]:  # Mở rộng lấy top 5 tài liệu thô ban đầu để rerank
+                title = r["title"]
+                if title in seen:
+                    continue
+                seen.add(title)
 
-            pages = extract.get("query", {}).get("pages", {})
-            page = list(pages.values())[0]
-            text = page.get("extract", "")
+                extract = self.client.extract(title)
+                pages = extract.get("query", {}).get("pages", {})
+                if not pages:
+                    continue
+                page = list(pages.values())[0]
 
-            if text:
-                evidences.append(
-                    Evidence(text=text, source=title)
-                )
+                text = page.get("extract", "")
+                if text and len(text) > 100:
+                    all_docs.append({
+                        "title": title,
+                        "text": text
+                    })
 
-        return evidences
-            
+        # Fallback nếu danh sách trống hoàn toàn trước khi xếp hạng
+        if not all_docs and topics:
+            fallback = self.client.search(topics[0])
+            results = fallback.get("query", {}).get("search", [])
+            if results:
+                title = results[0]["title"]
+                extract = self.client.extract(title)
+                pages = extract.get("query", {}).get("pages", {})
+                page = list(pages.values())[0]
+                text = page.get("extract", "")
+                if text:
+                    all_docs.append({"title": title, "text": text})
 
-retrieval_service = RetrievalService()
-query_builder = QueryBuilder()
-wiki_client = WikipediaClient()
+        if not all_docs:
+            return []
+
+        # 🔥 TỰ ĐỘNG PHÒNG THỦ: Nếu luồng gọi ngoài chưa truyền entity_links, tự động sinh ra
+        if entity_links is None:
+            entity_links = []
+            combined_query = " ".join(topics)
+            if nlp:
+                doc = nlp(combined_query)
+                mentions = self.linker.extract_mentions(doc)
+                for m in mentions:
+                    linked = self.linker.link(m)
+                    if linked:
+                        entity_links.append(linked)
+        # --- beam search function here ---
+        
+        
+        # 🔥 HYBRID RANKING CORE ACTIVATED
+        query_str = " ".join(topics)
+        ranked = self.hybrid.rank(
+            query=query_str,
+            docs=all_docs,
+            entity_links=entity_links
+        )
+
+        # Trả về Top 10 thực thể Evidence chất lượng cao nhất sau khi lọc hỗn hợp
+        return [
+            Evidence(text=d["text"], source=d["title"])
+            for d, _ in ranked[:10]
+        ]
+
+# Khởi tạo các Service đơn lẻ dùng chung toàn cục
+query_builder = QueryBuilder(linker=entity_linker)
+retrieval_service = RetrievalService(client=wiki_client, linker=entity_linker)

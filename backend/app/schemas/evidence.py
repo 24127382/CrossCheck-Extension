@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from typing import List
+from typing import List, Optional
 
 @dataclass
 class Evidence:
@@ -11,12 +11,13 @@ class Evidence:
 
 @dataclass
 class EvidenceScore:
-    """Scored evidence for ranking"""
     evidence: Evidence
     relevance_score: float
-    entailment_score: float
-    final_score: float
-
+    sentence_score: float = 0.0
+    entailment_score: float = 0.0
+    final_score: float = 0.0
+    
+    
 @dataclass
 class FactCheckEvidenceResponse:
     """Structured response for retreived evidence then 
@@ -24,3 +25,16 @@ class FactCheckEvidenceResponse:
     """
     claim: str
     evidences: List[Evidence]
+    
+@dataclass
+class EvidenceNode:
+    """Node structure for evidence graph"""
+    id: str
+    title: str
+    text: str
+    
+    parent: Optional[str] = None  # ID of parent node
+    children: List[str] = None  # IDs of child nodes
+    
+    depth: int = 0  # Depth in the graph
+    relevance_score: float = 0.0

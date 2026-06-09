@@ -1,43 +1,42 @@
 """Factcheck pipeline - orchestrates the fact-checking flow"""
 from typing import Optional
 from ..schemas.response import FactCheckResponse, EvidenceSchema
-from ..services.retrieval_service import retrieval_service, query_builder, wiki_client
+from ..services.retrieval_service import retrieval_service, query_builder, entity_linker, nlp
 from ..services.entailment_service import entailment_service
-from ..services.ranking_service import ranking_service, sentence_selector
+from ..services.ranking_service import ranking_service, sentence_selector, compute_final_score
 from ..services.cache_service import cache_service
 from ..schemas.evidence import Evidence
+
 class FactCheckPipeline:
     """Main fact-checking pipeline"""
     
     async def process(self, claim: str, context: Optional[str] = None) -> FactCheckResponse:
         """
-        Main fact-checking pipeline: claim → retrieve → rank → filter → RoBERTa verdict → response
-        
-        Flow:
-        1. Retrieve relevant evidence documents from Wikipedia
-        2. Rank evidence by relevance using embeddings
-        3. Filter by confidence threshold
-        4. Use RoBERTa model to predict verdict
-        5. Cache result for later explanation
-        6. Return response with verdict and confidence (no summary)
-        
-        Args:
-            claim: The claim to fact-check
-            context: Optional context information (unused in this version)
-            
-        Returns:
-            FactCheckResponse with verdict, confidence, and top evidences
+        Main fact-checking pipeline: 
+        claim → topics & entity links → Hybrid Retrieve (BM25+Dense+Entity) → rank → NLI score → aggregate → filter → RoBERTa verdict → response
         """
         try:
             print(f"\n[Pipeline] Starting fact-check for: {claim[:100]}")
             
-            # Step 1: noun chunking 
-            print("[Pipeline] Step 1: Extracting topics...")
+            # Step 1: Noun chunking & Topic extraction + Entity Linking
+            print("[Pipeline] Step 1: Extracting topics and grounding entity links...")
             topics = query_builder.extract_topics(claim)
-            # Step 2: Retrieve evidence from Wikipedia
-            print(f"[Pipeline] Step 2: Retrieving evidence for topics: {topics}")
-            evidences = retrieval_service.retrieve(topics)
-            print(f"[Pipeline] ✅ Retrieved {len(evidences)} evidence items")
+            
+            # Thu thập danh sách entity_links làm dữ liệu bổ trợ tăng hạng (Boost) cho Hybrid Retrieval
+            entity_links = []
+            if nlp:
+                doc = nlp(claim)
+                mentions = entity_linker.extract_mentions(doc)
+                for m in mentions:
+                    linked = entity_linker.link(m)
+                    if linked:
+                        entity_links.append(linked)
+            
+            # Step 2: Tìm kiếm kết hợp thuật toán Hybrid (BM25 + Dense + Entity Boost)
+            print(f"[Pipeline] Step 2: Running Hybrid Retrieval for topics: {topics} (Boosted Entities: {entity_links})")
+            # 🔥 ĐÃ TÍCH HỢP: Truyền thêm mảng entity_links vào hàm retrieve
+            evidences = retrieval_service.retrieve(topics=topics, entity_links=entity_links)
+            print(f"[Pipeline] ✅ Retrieved & Hybrid-Ranked {len(evidences)} evidence items")
             
             if not evidences:
                 print("[Pipeline] ⚠️ No evidence retrieved!")
@@ -49,20 +48,37 @@ class FactCheckPipeline:
                     evidences=[]
                 )
             
+            # Step 3: Đưa qua Cross-Encoder cấp câu để tinh chỉnh điểm tương đồng (Relevance & Sentence similarity)
+            print("[Pipeline] Step 3: Fine-ranking evidence via Cross-Encoder...")
+            scored_documents = await ranking_service.rank_evidence(claim, evidences)
+            
+            # Step 3.5: Tính điểm Entailment từ mô hình RoBERTa-MNLI
+            print("[Pipeline] Step 3.5: Computing entailment scores for documents...")
+            docs_to_entail = [sd.evidence for sd in scored_documents]
+            entailment_results = await entailment_service.compute_entailment(claim, docs_to_entail)
+            
+            # Ánh xạ điểm Entailment ngược lại vào danh sách scored_documents và tính điểm Final tổng hợp
+            for sd, er in zip(scored_documents, entailment_results):
+                sd.entailment_score = er.entailment_score
+                # Áp dụng hàm gộp điểm kết hợp clamping [0.0, 1.0]
+                sd.final_score = compute_final_score(
+                    relevance=sd.relevance_score,
+                    sentence_score=sd.sentence_score,
+                    entailment=sd.entailment_score
+                )
+            
+            # Sắp xếp lại danh sách theo điểm final_score thực tế sau gộp
+            scored_documents = sorted(scored_documents, key=lambda x: x.final_score, reverse=True)
 
-            print("[Pipeline] Step 2: Ranking evidence by relevance...")
-            ranked_evidences = await ranking_service.rank_evidence(claim, evidences)
+            # Step 4: Lọc phần tử theo ngưỡng threshold điểm gộp mới (final_score >= 0.3)
+            print("[Pipeline] Step 4: Filtering evidence based on final score threshold...")
+            filtered_evidences = [e for e in scored_documents if e.final_score >= 0.3]
             
-            # Step 3: Tự lọc tại chỗ (thay cho hàm filter_evidence cũ)
-            filtered_evidences = [e for e in ranked_evidences if e.final_score >= 0.3]
-            if not filtered_evidences and ranked_evidences:
-                filtered_evidences = ranked_evidences[:2]
-                
-            if not filtered_evidences and ranked_evidences:
+            if not filtered_evidences and scored_documents:
                 print("[Pipeline] ⚠️ Threshold quá cao! Lấy tạm Top 2 kết quả tốt nhất...")
-                filtered_evidences = ranked_evidences[:2]
+                filtered_evidences = scored_documents[:2]
             
-            print(f"[Pipeline] ✅ Filtered: {len(ranked_evidences)} → {len(filtered_evidences)}")
+            print(f"[Pipeline] ✅ Filtered: {len(scored_documents)} → {len(filtered_evidences)}")
             
             if not filtered_evidences:
                 print("[Pipeline] ⚠️ No evidence passed threshold!")
@@ -73,19 +89,22 @@ class FactCheckPipeline:
                     summary="",
                     evidences=[]
                 )
-            # Step 4: filter evidence by top-k (e.g., top 5 documents)
-            print("[Pipeline] Step 4: Selecting top-k documents...")
+                
+            # Step 5: Chọn top-k documents tốt nhất để tiến hành trích xuất câu ngắn bằng chứng
+            print("[Pipeline] Step 5: Selecting top-k documents...")
             top_evidences = [e.evidence for e in filtered_evidences[:5]]
-            # Step 5: Tách câu và lấy Top N câu liên quan nhất từ tất cả các Document
-            print("[Pipeline] Step 5: Extracting and ranking sentences...")
-            # LƯU Ý: Truyền thẳng mảng top_evidences vào, không dùng list comprehension!
+            
+            # Step 6: Tách câu và lấy câu liên quan nhất (Cross-Encoder rerank cấp câu)
+            print("[Pipeline] Step 6: Extracting and ranking sentences...")
             clean_sentence_evidences = sentence_selector.select(
+                claim=claim,
                 evidences=top_evidences,
                 top_n=1
             )
-
+            
             # Nếu không trích xuất được câu nào, fallback trả lỗi
             if not clean_sentence_evidences:
+                print("[Pipeline] ⚠️ No clean sentences extracted!")
                 return FactCheckResponse(
                     claim=claim,
                     verdict="NOT_ENOUGH_INFO",
@@ -95,16 +114,17 @@ class FactCheckPipeline:
                 )
 
             best_sentence = clean_sentence_evidences[0].text
-            print("[Pipeline] Step 6: Running RoBERTa prediction on pure sentences...")
+            
+            # Step 7: Chạy RoBERTa Predict Verdict dựa trên câu bằng chứng cô đọng tốt nhất
+            print("[Pipeline] Step 7: Running RoBERTa prediction on pure sentences...")
             verdict_result = await entailment_service.predict_verdict(
                 claim=claim,
                 pseudo_outline=best_sentence
             )
             print(f"[Pipeline] ✅ RoBERTa verdict: {verdict_result['verdict']} (confidence: {verdict_result['confidence']:.3f})")
             
-            
-            # Step 7: Format response - Trả về những câu ngắn đã dùng để user dễ đọc
-            print("[Pipeline] Step 7: Formatting response...")
+            # Step 8: Format response thành schema đầu ra
+            print("[Pipeline] Step 8: Formatting response...")
             response = FactCheckResponse(
                 claim=claim,
                 verdict=verdict_result.get("verdict", "NOT_ENOUGH_INFO"),
@@ -121,15 +141,7 @@ class FactCheckPipeline:
                 ]
             )
             
-            # Step 8: Cache result for later explanation
-            print("[Pipeline] Step 8: Caching result...")
-            # cache_service.save(
-            #     claim=claim,
-            #     verdict=response.verdict,
-            #     confidence=response.confidence,
-            #     evidences=clean_sentence_evidences # Cache luôn câu ngắn cho gọn DB
-            # )
-            
+            print("[Pipeline] Step 9: Pipeline execution finish.")
             print("[Pipeline] ✅ Pipeline complete!")
             return response
             
@@ -139,5 +151,4 @@ class FactCheckPipeline:
             traceback.print_exc()
             raise
 
-    
 factcheck_pipeline = FactCheckPipeline()

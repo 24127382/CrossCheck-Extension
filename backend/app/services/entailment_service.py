@@ -45,7 +45,7 @@ class EntailmentService:
                     return_tensors="pt",
                     truncation=True,
                     padding=True,
-                    max_length=512 # maybe this is too short ?
+                    max_length=512 # mocheg context window limit
                 )
                 
                 # Run model inference
@@ -63,8 +63,10 @@ class EntailmentService:
                 evidence_score = EvidenceScore(
                     evidence=evidence,
                     relevance_score=evidence.score,  # From retrieval service
+                    sentence_score=getattr(evidence, 'score', 0.0), # Giữ lại trạng thái điểm cũ nếu có
                     entailment_score=entailment_score,
-                    final_score=entailment_score  # Can be combined with relevance_score later
+                    # FIX: KHÔNG ghi đè final_score tại đây để giữ tầng gộp điểm (aggregation) chạy chuẩn xác
+                    final_score=evidence.score  
                 )
                 results.append(evidence_score)
                 
@@ -127,7 +129,7 @@ class EntailmentService:
                 confidence = neutral_score
 
             print(
-                f"[Entailment] ✅ Predicted verdict: "
+                f"[Entailment" f"] ✅ Predicted verdict: "
                 f"{verdict} ({confidence:.3f})"
             )
 
