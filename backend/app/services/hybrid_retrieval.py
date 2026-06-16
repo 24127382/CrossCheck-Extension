@@ -82,3 +82,5 @@ class HybridRetrieval:
             reverse=True
         )
         return ranked
+    
+hybrid_retrieval = HybridRetrieval()

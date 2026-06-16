@@ -1,11 +1,15 @@
 """Retrieval service - handles evidence retrieval from Wikipedia"""
+import heapq
+import urllib.parse
 import spacy
-from typing import List, Optional
-from ..schemas.evidence import Evidence
-from hybrid_retrieval import HybridRetrieval  
-from wikipedia_client import WikipediaClient, wiki_client  # Import một chiều từ hạ tầng    
-from entity_linker import EntityLinker, entity_linker  # Import một chiều từ hạ tầng
-# Load spacy model for NER
+from typing import List, Dict, Optional
+from sentence_transformers import util
+
+from ..schemas.evidence import Evidence, Node
+from app.services.hybrid_retrieval import HybridRetrieval  
+from app.services.wikipedia_client import WikipediaClient, wiki_client     
+from app.services.entity_linker import EntityLinker, entity_linker  
+
 try:
     nlp = spacy.load("en_core_web_lg")
 except OSError:
@@ -55,13 +59,12 @@ class RetrievalService:
     def __init__(self, client: WikipediaClient, linker: EntityLinker):
         self.client = client
         self.linker = linker
-        self.hybrid = HybridRetrieval()  # 🔥 Khởi tạo Hybrid Engine
+        self.hybrid = HybridRetrieval()  
 
     def retrieve(self, topics: List[str], entity_links: Optional[List[str]] = None) -> List[Evidence]:
         all_docs = []
         seen = set()
 
-        # Tạo bản sao tránh biến đổi list gốc
         expanded_topics = list(topics)
         if topics:
             expanded_topics.append(" ".join(topics))
@@ -74,7 +77,7 @@ class RetrievalService:
             if not results:
                 continue
 
-            for r in results[:5]:  # Mở rộng lấy top 5 tài liệu thô ban đầu để rerank
+            for r in results[:5]:  
                 title = r["title"]
                 if title in seen:
                     continue
@@ -93,7 +96,6 @@ class RetrievalService:
                         "text": text
                     })
 
-        # Fallback nếu danh sách trống hoàn toàn trước khi xếp hạng
         if not all_docs and topics:
             fallback = self.client.search(topics[0])
             results = fallback.get("query", {}).get("search", [])
@@ -109,7 +111,6 @@ class RetrievalService:
         if not all_docs:
             return []
 
-        # 🔥 TỰ ĐỘNG PHÒNG THỦ: Nếu luồng gọi ngoài chưa truyền entity_links, tự động sinh ra
         if entity_links is None:
             entity_links = []
             combined_query = " ".join(topics)
@@ -120,10 +121,7 @@ class RetrievalService:
                     linked = self.linker.link(m)
                     if linked:
                         entity_links.append(linked)
-        # --- beam search function here ---
         
-        
-        # 🔥 HYBRID RANKING CORE ACTIVATED
         query_str = " ".join(topics)
         ranked = self.hybrid.rank(
             query=query_str,
@@ -131,7 +129,6 @@ class RetrievalService:
             entity_links=entity_links
         )
 
-        # Trả về Top 10 thực thể Evidence chất lượng cao nhất sau khi lọc hỗn hợp
         return [
             Evidence(text=d["text"], source=d["title"])
             for d, _ in ranked[:10]
@@ -140,3 +137,170 @@ class RetrievalService:
 # Khởi tạo các Service đơn lẻ dùng chung toàn cục
 query_builder = QueryBuilder(linker=entity_linker)
 retrieval_service = RetrievalService(client=wiki_client, linker=entity_linker)
+
+
+# ==========================================
+# GRAPH RETRIEVAL SERVICE ENGINE
+# ==========================================
+class GraphRetrievalService:
+    """
+    Ultra-Optimized Beam Search Graph Retrieval
+    Đã fix: Pre-compute Claim Embeddings, Limit Entity Scope, Refined Score.
+    """
+
+    def __init__(self, client, linker, max_depth=2, beam_size=3):
+        self.client = client
+        self.linker = linker
+        self.max_depth = max_depth
+        self.beam_size = beam_size
+        from sentence_transformers import SentenceTransformer
+        self.model = SentenceTransformer("all-MiniLM-L6-v2")
+        
+        # Cache lưu kết quả API
+        self._page_cache = {}
+
+    @staticmethod  
+    def clean_wiki_title(url_or_title: str) -> str:  
+        if not url_or_title:
+            return ""
+        if "wikipedia.org/wiki/" in url_or_title:
+            url_or_title = url_or_title.split("wikipedia.org/wiki/")[-1]
+        decoded_title = urllib.parse.unquote(url_or_title)
+        cleaned = decoded_title.strip().replace(" ", "_").lower()
+        cleaned = cleaned.replace("-lrb-", "(").replace("-rrb-", ")")
+        return cleaned
+
+    def _cached_extract(self, title: str) -> str:
+        cleaned_key = self.clean_wiki_title(title)
+        if cleaned_key in self._page_cache:
+            return self._page_cache[cleaned_key]
+        
+        try:
+            page = self.client.extract(title)
+            pages = page.get("query", {}).get("pages", {})
+            if not pages: return ""
+            data = list(pages.values())[0]
+            text = data.get("extract", "")
+            self._page_cache[cleaned_key] = text
+            return text
+        except Exception:
+            return ""
+
+    # 🔥 FIX 1 & 4: Nhận thẳng claim_emb và claim_tokens đã tính sẵn từ bên ngoài
+    def _score(self, claim_emb, claim_tokens: set, text: str, title: str) -> float:
+        try:
+            # Chỉ encode text, không encode lại claim
+            text_emb = self.model.encode(text[:1000], convert_to_tensor=True)
+            dense = float(util.cos_sim(claim_emb, text_emb)[0][0])
+        except Exception:
+            dense = 0.0
+
+        title_cleaned = title.replace("_", " ").lower()
+        title_tokens = set(title_cleaned.split())
+        
+        # Chỉ dùng overlap như một điểm cộng nhỏ (tie-breaker), không cho phép nó lấn át
+        entity_overlap = len(claim_tokens & title_tokens) / (len(title_tokens) + 1e-6)
+
+        # Trọng số ưu tiên tuyệt đối vào Semantic Context thay vì Lexical Match
+        return 0.85 * dense + 0.15 * entity_overlap
+    
+    # 🔥 FIX 3: Ngăn chặn Semantic Drift
+    def _expand(self, node: Node, claim_emb, claim_tokens) -> List[Node]:
+        children = []
+        if node.depth >= self.max_depth:
+            return children
+
+        global nlp
+        if nlp is None:
+            try: nlp = spacy.load("en_core_web_lg")
+            except: return children
+
+        # CHỈ ĐỌC 400 KÝ TỰ ĐẦU CỦA NODE: Bắt chính xác anchor entity, loại bỏ rác (Harvard, New York)
+        doc = nlp(node.text[:400])
+        linked_titles = self.linker.extract_mentions(doc)
+        linked_titles = [self.linker.link(m) for m in linked_titles if m]
+
+        seen_local = set()
+        unique_titles = []
+        for t in linked_titles:
+            c_t = self.clean_wiki_title(t)
+            if c_t and c_t not in seen_local:
+                seen_local.add(c_t)
+                unique_titles.append(t)
+
+        for title in unique_titles[:self.beam_size]:
+            try:
+                text = self._cached_extract(title)
+                if len(text) < 100:
+                    continue
+
+                # Truyền claim_emb vào _score
+                score = self._score(claim_emb, claim_tokens, text, title)
+                children.append(Node(
+                    title=title, text=text, depth=node.depth + 1,
+                    score=score, parent=node.title
+                ))
+            except Exception:
+                continue
+        return children
+
+    def retrieve(self, topics: List[str], claim: str) -> List[Dict]:
+        frontier = []
+        visited = set()
+        results = []
+        count = 0
+        
+        # 🔥 FIX 1: TÍNH TOÁN CLAIM ĐÚNG 1 LẦN DUY NHẤT Ở ĐÂY
+        # Tính embedding và token set của claim một lần duy nhất để tái sử dụng xuyên suốt quá trình
+        claim_emb = self.model.encode(claim, convert_to_tensor=True)
+        claim_tokens = set(claim.lower().split())
+        
+        search_queries = []
+        if len(topics) >= 2:
+            search_queries.append(f'"{topics[0]} {topics[1]}"')
+        search_queries.extend(topics[:3])
+        search_queries.append(" ".join(topics))
+        
+        candidates_seen = set()
+        for query in search_queries:
+            try:
+                search = self.client.search(query)
+                for c in search.get("query", {}).get("search", [])[:3]:
+                    c_title = self.clean_wiki_title(c["title"])
+                    if c_title not in candidates_seen:
+                        candidates_seen.add(c_title)
+                        
+                        text = self._cached_extract(c["title"])
+                        if len(text) < 100: continue
+                        
+                        # Truyền claim_emb vào
+                        score = self._score(claim_emb, claim_tokens, text, c["title"])
+                        node = Node(c["title"], text, 0, score)
+                        heapq.heappush(frontier, (-score, count, node))
+                        count += 1
+            except Exception:
+                continue
+
+        # BEAM SEARCH LOOP
+        while frontier and len(results) < self.beam_size:
+            _, _, node = heapq.heappop(frontier)
+            cleaned_title = GraphRetrievalService.clean_wiki_title(node.title)
+
+            if cleaned_title in visited: continue
+
+            visited.add(cleaned_title)
+            results.append(node)
+
+            # Truyền claim_emb đi tiếp
+            children = self._expand(node, claim_emb, claim_tokens)
+            for child in children:
+                cleaned_child_title = GraphRetrievalService.clean_wiki_title(child.title)
+                if cleaned_child_title in visited: continue
+
+                heapq.heappush(frontier, (-child.score, count, child))
+                count += 1
+
+        return [
+            {"title": n.title, "text": n.text, "score": n.score}
+            for n in results
+        ]

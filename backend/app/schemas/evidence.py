@@ -8,12 +8,12 @@ class Evidence:
     stance: str = "neutral"  # 'supports', 'contradicts', 'neutral'
     score: float = 0.0
     text: str = ""
-
+    sentence_id: Optional[int] = None
+# EvidenceScore có vấn đề trong ranking service line 36 và factcheck pipeline line 64, cần sửa lại để tránh lỗi khi gán giá trị final_score
 @dataclass
 class EvidenceScore:
     evidence: Evidence
     relevance_score: float
-    sentence_score: float = 0.0
     entailment_score: float = 0.0
     final_score: float = 0.0
     
@@ -27,14 +27,9 @@ class FactCheckEvidenceResponse:
     evidences: List[Evidence]
     
 @dataclass
-class EvidenceNode:
-    """Node structure for evidence graph"""
-    id: str
+class Node:
     title: str
     text: str
-    
-    parent: Optional[str] = None  # ID of parent node
-    children: List[str] = None  # IDs of child nodes
-    
-    depth: int = 0  # Depth in the graph
-    relevance_score: float = 0.0
+    depth: int
+    score: float
+    parent: str = None
