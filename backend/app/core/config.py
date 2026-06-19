@@ -30,15 +30,16 @@ class Settings(BaseSettings):
     
     # AI Studio Configuration
     PROJECT_NAME: str = "crosscheck-factcheck"
-    
-    # Đổi thành viết HOA cho đồng bộ với file .env và chuẩn convention
     AI_STUDIO_KEY: str = "" 
     
-    # Cấu hình tập trung của Pydantic v2 (Đã xóa class Config cũ)
+    # Hugging Face Configuration
+    HF_TOKEN: str # <--- THÊM DÒNG NÀY VÀO ĐÂY (Bắt buộc phải có trong file .env)
+    
+    # Cấu hình tập trung của Pydantic v2
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="ignore"  # Lời khuyên: Đổi từ "forbid" thành "ignore" để sau này lỡ file .env có thừa biến (ví dụ DB_PASS, v.v.) thì app vẫn chạy mượt không bị crash bất ngờ.
+        extra="ignore"
     )
 
 settings = Settings()

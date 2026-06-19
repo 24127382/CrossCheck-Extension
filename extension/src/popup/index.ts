@@ -27,7 +27,7 @@ function displayLoading() {
 function displayResult(result: any) {
   if (!app) return;
   app.innerHTML = `
-    <div class="debug-log" style="font-size: 11px; color: #666; max-height: 80px; overflow-y: auto; margin-bottom: 8px; padding: 4px; border: 1px solid #ddd; font-family: monospace;"></div>
+    <div class="debug-log" style="font-size: 11px; color: #666; max-height: 100px; overflow-y: auto; margin-bottom: 8px; padding: 4px; border: 1px solid #ddd; font-family: monospace;"></div>
     <div class="result-card">
       <div class="verdict ${result.verdict.toLowerCase()}">
         ${result.verdict}
@@ -36,9 +36,31 @@ function displayResult(result: any) {
         Confidence: ${(result.confidence * 100).toFixed(1)}%
       </div>
       <p style="margin-top: 8px; font-size: 14px;">${result.summary}</p>
+      <button id="explainBtn" style="margin-top: 12px; padding: 8px 12px; background: #2196F3; color: white; border: none; border-radius: 4px; cursor: pointer;">
+        Get LLM Explanation
+      </button>
+      <div id="explanationContainer" style="margin-top: 12px; font-size: 13px; color: #333; line-height: 1.4; display: none; padding: 8px; background: #f9f9f9; border-radius: 4px;"></div>
     </div>
   `;
   displayDebugLog('Result displayed');
+  
+  // Add click handler
+  document.getElementById('explainBtn')?.addEventListener('click', async () => {
+    try {
+      displayDebugLog('Calling LLM...');
+      const explanation = await factcheckService.explainClaim(result.claim);
+      
+      // SỬA LỖI 1: Sử dụng biến explanation để hiển thị lên UI
+      const container = document.getElementById('explanationContainer');
+      if (container) {
+        container.innerHTML = `<strong>Explanation:</strong><br/>${explanation}`;
+        container.style.display = 'block';
+      }
+      displayDebugLog('Explanation displayed');
+    } catch (error: any) {
+      displayDebugLog('Error: ' + error.message);
+    }
+  });
 }
 
 function displayError(message: string) {
@@ -47,6 +69,38 @@ function displayError(message: string) {
     <div class="debug-log" style="font-size: 11px; color: #cc0000; max-height: 100px; overflow-y: auto; margin-bottom: 8px; padding: 4px; border: 1px solid #ddd; font-family: monospace;"></div>
     <div class="error-message">${message}</div>
   `;
+}
+
+function displayInputForm() {
+  if (!app) return;
+  app.innerHTML = `
+    <div class="input-form">
+      <textarea id="claimInput" placeholder="Enter claim to fact-check..." rows="4"></textarea>
+      <div class="button-group">
+        <button id="submitBtn">Fact Check</button>
+        <button id="llmCheckBtn">Check with LLM</button>
+      </div>
+    </div>
+  `;
+  
+  const handleCheck = async (isLLMOnly: boolean) => {
+    const text = (document.getElementById('claimInput') as HTMLTextAreaElement).value;
+    if (text.trim()) {
+      displayLoading();
+      try {
+        const result = isLLMOnly 
+          ? await factcheckService.checkWithLLM(text)
+          : await factcheckService.checkClaim(text);
+        displayResult(result);  // Cùng function displayResult cho cả hai
+      } catch (error: any) {
+        const errorMsg = isLLMOnly ? 'LLM check failed' : 'Backend unavailable';
+        displayError(`${errorMsg}: ${error.message}`);
+      }
+    }
+  };
+  
+  document.getElementById('submitBtn')?.addEventListener('click', () => handleCheck(false));
+  document.getElementById('llmCheckBtn')?.addEventListener('click', () => handleCheck(true));
 }
 
 async function initializePopup() {
@@ -98,10 +152,9 @@ async function initializePopup() {
     }
 
     if (!selectedText?.trim()) {
-      console.log('[Popup] Step 7: No text selected');
-      if (app) {
-        app.innerHTML = '<div class="debug-log" style="font-size: 11px; color: #666; padding: 4px; border: 1px solid #ddd; font-family: monospace;"><div>[✓] Content script loaded</div><div>[✗] No text selected</div></div><p>Please select text and try again, or use right-click menu</p>';
-      }
+      console.log('[Popup] Step 7: No text selected. Showing input form...');
+      // SỬA LỖI 2: Gọi hàm displayInputForm() tại đây thay vì hiện thông báo lỗi rườm rà
+      displayInputForm();
       return;
     }
 
@@ -134,14 +187,21 @@ async function initializePopup() {
       let errorMsg = '[✗] Error: ' + error.message;
       
       if (error.message === 'RESTRICTED_CONTEXT') {
-        errorMsg = '[✗] Cannot access this page type. Please use the extension on regular websites.';
+        errorMsg = '[✗] Cannot access this page type. Showing input form...';
+        // Nếu trang bị cấm (như chrome://), cho người dùng nhập tay luôn
+        displayInputForm();
+        return;
       } else if (error.message.includes('Could not establish connection') || error.message.includes('Receiving end does not exist')) {
-        errorMsg = '[✗] Content script blocked (likely due to site security policy). Try on a news site or regular webpage instead.';
+        errorMsg = '[✗] Content script blocked. Showing input form...';
+        displayInputForm();
+        return;
       } else if (error.message.includes('timeout')) {
-        errorMsg = '[✗] Content script not loaded. Make sure you\'re on a regular webpage (not ChatGPT, Gmail, etc.).';
+        errorMsg = '[✗] Content script not loaded. Showing input form...';
+        displayInputForm();
+        return;
       }
       
-      app.innerHTML = '<div class="debug-log" style="font-size: 11px; color: #cc0000; padding: 4px; border: 1px solid #ddd; font-family: monospace;"><div>' + errorMsg + '</div><div style="font-size: 10px; margin-top: 4px; color: #999;">Try: BBC.com, Wikipedia, or any news site</div></div><p style="margin-top: 8px; font-size: 13px;">Select text on a regular webpage or use right-click menu</p>';
+      app.innerHTML = '<div class="debug-log" style="font-size: 11px; color: #cc0000; padding: 4px; border: 1px solid #ddd; font-family: monospace;"><div>' + errorMsg + '</div></div>';
     }
   }
 }

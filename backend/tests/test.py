@@ -1,7 +1,6 @@
 """
-Script test doc lap tang NLI (RoBERTa) tích hợp chuẩn cấu trúc EntailmentService.
-Chạy luồng từ Retrieval -> Selector -> Dự đoán nhãn bằng RoBERTa.
-Tối ưu hóa Batching chạy cuốn chiếu trên CPU để tránh treo máy.
+Independent test script for NLI layer (DeBERTa) integrating EntailmentService.
+Fully synchronized logic with the original Service file.
 """
 import asyncio
 import sys
@@ -9,8 +8,11 @@ import time
 import urllib.parse
 from datasets import load_dataset
 import traceback
+import random
 
-# Import các service độc lập theo đúng kiến trúc của bạn
+sys.stdout.reconfigure(encoding='utf-8')
+
+# Import services based on your architecture
 from app.services.retrieval_service import query_builder, retrieval_service
 from app.services.ranking_service import ranking_service, sentence_selector
 from app.services.entailment_service import entailment_service
@@ -34,24 +36,36 @@ def clean_wiki_title(url_or_title: str) -> str:
     return cleaned
 
 
-def map_roberta_to_fever(roberta_verdict: str) -> str:
-    """
-    Ánh xạ nhãn từ đầu ra của RoBERTa (CONTRADICTS) 
-    về nhãn chuẩn của bộ dữ liệu FEVER (REFUTES)
-    """
-    v = roberta_verdict.upper().strip()
-    if v == "CONTRADICTS":
-        return "REFUTES"
-    return v
+def extract_gold_evidence_fixed(sample):
+    """Accurately extract FEVER v1.0 4-level nested evidence structure"""
+    gold_pages = set()
+    gold_sentences_idx = []
+    
+    if "evidence" in sample and sample["evidence"]:
+        for evidence_group in sample["evidence"]:
+            for evidence_item in evidence_group:
+                if isinstance(evidence_item, (list, tuple)) and len(evidence_item) >= 4:
+                    page_title = evidence_item[2]
+                    sent_idx = evidence_item[3]
+                    if page_title:
+                        gold_pages.add(page_title)
+                    if sent_idx is not None and sent_idx != -1:
+                        gold_sentences_idx.append(f"{page_title} [Sent {sent_idx}]")
+                        
+    page_str = ", ".join(list(gold_pages))
+    sent_str = ", ".join(gold_sentences_idx)
+    return page_str if page_str else "N/A", sent_str if sent_str else "N/A"
 
 
 async def process_nli_sample(sample, current_idx, total_count):
-    """Xử lý luồng lấy câu bằng chứng và đẩy sang predict_verdict của bạn"""
     claim = sample["claim"]
-    gold_label = sample["label"].upper().strip() # SUPPORTS hoặc REFUTES
+    gold_label = sample["label"].upper().strip() # SUPPORTS or REFUTES
+
+    # Get gold evidence from dataset
+    gold_page, gold_sentence = extract_gold_evidence_fixed(sample)
 
     try:
-        # 1. Trích xuất topic & entity
+        # 1. Extract topics & entities from Claim
         topics = query_builder.extract_topics(claim)
         entity_links = []
         if nlp and entity_linker:
@@ -61,77 +75,109 @@ async def process_nli_sample(sample, current_idx, total_count):
                 linked = entity_linker.link(m)
                 if linked: entity_links.append(linked)
         
-        # 2. Retrieval trang tài liệu
+        # 2. Retrieve documents from Wikipedia
         evidences = retrieval_service.retrieve(topics=topics, entity_links=entity_links)
         if not evidences:
-            return None # Bỏ qua nếu không cào được trang
+            print(f" [{current_idx}/{total_count}] SKIP | Claim: {claim[:45]}... | Reason: Cannot retrieve pages")
+            return None 
 
-        # 3. Rerank tài liệu & Selector chọn câu bằng chứng
+        retrieved_pages = ", ".join([clean_wiki_title(e.url if hasattr(e, 'url') else getattr(e, 'title', '')) for e in evidences])
+
+        # 3. Rerank documents & select top sentences
         scored_documents = await ranking_service.rank_evidence(claim, evidences)
         scored_documents = sorted(scored_documents, key=lambda x: x.final_score, reverse=True)
-        top_evidences = [e.evidence for e in scored_documents[:5]]
+        top_evidences = [e.evidence for e in scored_documents[:10]]
         
         sentence_evidences = sentence_selector.select(
-            claim=claim, evidences=top_evidences, top_n=3
+            claim=claim, evidences=top_evidences, top_n=2
         )
         if not sentence_evidences:
+            print(f" [{current_idx}/{total_count}] SKIP | Claim: {claim[:45]}... | Reason: Sentence Selector empty")
             return None
 
-        # 4. Nối các câu bằng chứng thành chuỗi pseudo_outline giống cấu trúc hàm của bạn mong muốn
-        pseudo_outline = " ".join([ev.text for ev in sentence_evidences])
+        selected_sentences_log = " | ".join([f"[{ev.page if hasattr(ev, 'page') else ''}]: {ev.text}" for ev in sentence_evidences])
         
-        # 5. 🔥 GỌI HÀM PREDICT_VERDICT CỦA FILE ENTAILMENT SERVICE
-        # Hàm nhận (claim, pseudo_outline) và trả về một dict chứa "verdict"
-        res_dict = await entailment_service.predict_verdict(claim=claim, pseudo_outline=pseudo_outline)
+        # Convert to list of sentence text
+        pseudo_outline = [ev.text for ev in sentence_evidences]
         
-        pred_raw = res_dict.get("verdict", "NOT_ENOUGH_INFO")
-        # Ánh xạ CONTRADICTS -> REFUTES để so khớp công bằng với FEVER
-        pred_label = map_roberta_to_fever(pred_raw)
+        # 4. Predict verdict via batching service
+        res_dict = await entailment_service.predict_verdict(claim=claim, evidences=pseudo_outline)
+        
+        # Extract results
+        pred_label = res_dict.get("verdict", "NOT_ENOUGH_INFO").upper().strip()
+        confidence = res_dict.get("confidence", 0.0)
+        scores = res_dict.get("scores", {})
+        debug_info = res_dict.get("debug", {})  
         
         is_correct = (pred_label == gold_label)
-        status = "DUNG" if is_correct else " SAI "
+        status = "CORRECT" if is_correct else "WRONG"
         
-        print(f" [{current_idx}/{total_count}] {status} | Claim: {claim[:45]}...")
-        print(f" Gold FEVER: {gold_label} | RoBERTa Pred: {pred_raw} (Mapped: {pred_label})")
+        # --- DETAILED SYSTEM LOG (NO ACCENTS, NO ICONS) ---
+        print("-" * 80)
+        print(f"INDEX: {current_idx}/{total_count} | PIPELINE RESULT: {status}")
+        print(f"CLAIM          : {claim}")
+        print(f"GOLD PAGE      : {gold_page}")
+        print(f"GOLD SENTENCE  : {gold_sentence}")
+        print(f"GOLD LABEL     : {gold_label}")
+        print(f"RETRIEVAL PAGE : {retrieved_pages[:150]}...")
+        print(f"SENTENCE SELECT: {selected_sentences_log[:200]}...")
+        print(f"PRED LABEL     : {pred_label} (Confidence: {confidence*100:.2f}%)")
+        
+        # Mentor Request 1: Print threshold decision scores
+        print(
+            f"SCORES -> "
+            f"S:{scores.get('supports', 0.0):.3f} | "
+            f"R:{scores.get('refutes', 0.0):.3f} | "
+            f"N:{scores.get('nei', 0.0):.3f}"
+        )
+        
+        # Mentor Request 2: Log raw probability of each sentence
+        if "raw_probs" in debug_info and debug_info["raw_probs"]:
+            print("\nEVIDENCE BREAKDOWN")
+            for idx, (ev, p) in enumerate(
+                zip(sentence_evidences, debug_info["raw_probs"]),
+                1
+            ):
+                print(
+                    f"[{idx}] "
+                    f"S={p.get('supports', 0.0):.3f} "
+                    f"R={p.get('refutes', 0.0):.3f} "
+                    f"N={p.get('nei', 0.0):.3f}"
+                )
+                print(ev.text[:150])
+                
+        print("-" * 80)
         
         return is_correct
 
     except Exception as e:
-        print(f" [{current_idx}/{total_count}]  Loi luong NLI: {str(e)}")
+        print(f" [{current_idx}/{total_count}] NLI Pipeline Error: {str(e)}")
         traceback.print_exc()
         return False
 
 
-async def test_nli_accuracy(samples: int = 30, batch_size: int = 2):
-    """
-    Hàm kiểm thử NLI cuốn chiếu theo Batch nhỏ tối ưu hóa cho CPU.
-    Khuyên dùng samples = 30 mẫu để lấy nhanh tỷ lệ chính xác ban đầu.
-    """
-    print("[INIT] Dang tai bo du lieu FEVER v1.0...")
+async def test_nli_accuracy(samples: int = 200, batch_size: int = 2):
+    print("[INIT] Loading FEVER v1.0 dataset...")
     dataset = load_dataset("fever", "v1.0")
     dev_set = dataset["labelled_dev"]
     
-    # Lọc lấy các mẫu có nhãn phân loại rõ ràng
-    valid_samples = [s for s in dev_set if s["label"] in ["SUPPORTS", "REFUTES"]][:samples]
+    # Shuffle dataset for rich samples
+    raw_valid = [s for s in dev_set if s["label"] in ["SUPPORTS", "REFUTES"]]
+    random.seed(42)  # Keep results consistent across debug runs
+    random.shuffle(raw_valid)
+    valid_samples = raw_valid[:samples]
     total_samples = len(valid_samples)
     
-    print(f"[START] Kich hoat danh gia RoBERTa NLI tren {total_samples} mau...")
-    print(f" Che đo toi uu CPU: Cuon chieu theo cum (Batch size = {batch_size})")
+    print(f"[START] Activating DeBERTa NLI evaluation on {total_samples} samples...")
     print("=" * 85)
     
     start_time = time.time()
     nli_hit = 0
     total_valid_executed = 0
     
-    # Chạy cuốn chiếu để bảo vệ CPU không bị quá tải 100%
     for i in range(0, total_samples, batch_size):
         batch = valid_samples[i:i + batch_size]
-        
-        tasks = [
-            process_nli_sample(sample, i + idx + 1, total_samples)
-            for idx, sample in enumerate(batch)
-        ]
-        
+        tasks = [process_nli_sample(sample, i + idx + 1, total_samples) for idx, sample in enumerate(batch)]
         batch_results = await asyncio.gather(*tasks)
         
         for res in batch_results:
@@ -140,19 +186,19 @@ async def test_nli_accuracy(samples: int = 30, batch_size: int = 2):
                 if res is True:
                     nli_hit += 1
                     
-        await asyncio.sleep(0.3) # Giãn cách nhỏ để CPU giải nhiệt
+        await asyncio.sleep(0.3)
         sys.stdout.flush()
 
     end_time = time.time()
-    print("\n" + "=" * 25 + " ROBERTA NLI ACCURACY REPORT " + "=" * 25)
-    print(f"Tong thoi gian chay test         : {end_time - start_time:.2f} giây (~{(end_time - start_time)/60:.1f} phút)")
-    print(f"So mau kiem tra hop le thanh cong: {total_valid_executed}")
-    print(f"So mau RoBERTa đoan đung nhan    : {nli_hit}")
+    print("\n" + "=" * 25 + " DEBERTA NLI ACCURACY REPORT " + "=" * 25)
+    print(f"Total execution time             : {end_time - start_time:.2f} seconds")
+    print(f"Successfully executed samples    : {total_valid_executed}")
+    print(f"Correct DeBERTa predictions      : {nli_hit}")
     if total_valid_executed > 0:
-        print(f"DO CHINH XAC NHAN CUOI CUNG (Accuracy): {nli_hit / total_valid_executed * 100:.2f}%")
+        print(f"FINAL ACCURACY                   : {nli_hit / total_valid_executed * 100:.2f}%")
     print("=" * 79)
 
 
 if __name__ == "__main__":
-    # Đặt mặc định 30 mẫu để CPU quét nhanh tầm vài phút là ra kết quả
-    asyncio.run(test_nli_accuracy(samples=30, batch_size=2))
+    # Updated samples count to 200 as requested
+    asyncio.run(test_nli_accuracy(samples=200, batch_size=2))

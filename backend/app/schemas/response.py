@@ -12,7 +12,6 @@ class EvidenceSchema(BaseModel):
     stance: str = Field(..., description="Stance towards claim: supports, contradicts, neutral")
     score: float = Field(..., ge=0, le=1, description="Confidence score for this evidence")
     text: Optional[str] = Field(None, description="Full text of the evidence")
-    sentence_id: Optional[int] = None
 class FactCheckRequest(BaseModel):
     """Request body for fact-check endpoint"""
     text: str = Field(..., description="Claim to fact-check")

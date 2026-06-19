@@ -17,4 +17,10 @@ export const factcheckService = {
   async explainClaim(claim: string): Promise<ExplainResponse> {
     return await apiService.explain(claim);
   },
+
+  async checkWithLLM(text: string): Promise<FactCheckResponse> {
+    const result = await apiService.llmCheck(text);
+    await storageService.saveResult(text, result);  // Lưu cache
+    return result;
+}
 };

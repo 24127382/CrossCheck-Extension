@@ -1,160 +1,387 @@
-"""
-Script test doc lap nang luc cua Sentence Selector bang co che so khop Trang Vang FEVER.
-Sử dụng trực tiếp các Service độc lập theo đúng kiến trúc của bạn, loai bo loi phat oan cua trung tu khoa.
-"""
 import asyncio
-import sys
-import time
 import urllib.parse
-from datasets import load_dataset
 import traceback
 
-# Import dung cac service doc lap nhu ban cung cap
-from app.services.retrieval_service import query_builder, retrieval_service
-from app.services.ranking_service import ranking_service, sentence_selector
+from datasets import load_dataset
+from sentence_transformers import SentenceTransformer, util
+
+from app.services.retrieval_service import (
+    retrieval_service,
+    query_builder
+)
+
+from app.services.ranking_service import (
+    ranking_service,
+    sentence_selector
+)
 
 try:
     from app.services.retrieval_service import entity_linker
     import spacy
+
     nlp = spacy.load("en_core_web_sm")
-except Exception:
-    nlp = None
+except:
     entity_linker = None
+    nlp = None
 
 
-def clean_wiki_title(url_or_title: str) -> str:
-    if not url_or_title: return ""
-    # Nếu đầu vào là URL đầy đủ, bóc tách lấy phần tên trang cuối cùng
-    if "wikipedia.org/wiki/" in url_or_title:
-        url_or_title = url_or_title.split("wikipedia.org/wiki/")[-1]
-    decoded_title = urllib.parse.unquote(url_or_title)
-    cleaned = decoded_title.strip().replace(" ", "_").lower()
-    cleaned = cleaned.replace("-lrb-", "(").replace("-rrb-", ")")
-    return cleaned
+# ==========================================================
+# Semantic Similarity Model
+# ==========================================================
+
+sim_model = SentenceTransformer(
+    "all-MiniLM-L6-v2"
+)
 
 
-def is_keyword_fallback_match(retrieved_text: str, gold_claim: str) -> bool:
-    """ 
-    Cơ chế dự phòng: Nếu lệch tên trang nhưng câu chứa >65% từ khóa cốt lõi của claim 
-    (loại trừ các từ gây nhiễu phủ định như language, film, v.v.)
+# ==========================================================
+# Utils
+# ==========================================================
+
+def clean_wiki_title(title: str):
+
+    if not title:
+        return ""
+
+    if "wikipedia.org/wiki/" in title:
+        title = title.split(
+            "wikipedia.org/wiki/"
+        )[-1]
+
+    title = urllib.parse.unquote(title)
+
+    return (
+        title
+        .strip()
+        .replace(" ", "_")
+        .lower()
+    )
+
+
+# ==========================================================
+# Load Gold Sentence
+# ==========================================================
+
+def get_gold_sentence_text(
+    sample,
+    retrieved_docs
+):
     """
-    text_clean = retrieved_text.lower()
-    claim_words = [w for w in gold_claim.lower().split() if len(w) > 3 and w not in ["english", "spanish", "language", "film"]]
-    if not claim_words: 
-        return False
-    matches = sum(1 for word in claim_words if word in text_clean)
-    return (matches / len(claim_words)) >= 0.65
+    Cố gắng lấy đúng gold sentence từ document
+    mà retrieval vừa tải về.
+    """
 
+    gold_page = clean_wiki_title(
+        sample["evidence_wiki_url"]
+    )
 
-async def test_selector_quality(samples: int = 100):
-    print("[INIT] Dang tai bo du lieu FEVER v1.0...")
-    try:
-        dataset = load_dataset("fever", "v1.0")
-        dev_set = dataset["labelled_dev"]
-        print(f"[SUCCESS] Tai xong dataset. Tong so mau dev: {len(dev_set)}")
-    except Exception as e:
-        print(f"[ERROR] Khong the tai dataset: {str(e)}")
-        return
-    
-    total_valid = 0
-    selector_hit = 0
-    
-    print(f"[START] Kich hoat danh gia nang luc Sentence Selector tren {samples} mau...")
-    print("=" * 80)
-    
-    processed = 0
-    idx = 0
-    
-    while processed < samples and idx < len(dev_set):
-        sample = dev_set[idx]
-        claim = sample["claim"]
-        label = sample["label"]
-        
-        # Bóc nhãn vàng chuẩn từ bộ dữ liệu phẳng FEVER
-        gold_url = sample.get("evidence_wiki_url", "")
-        gold_page = clean_wiki_title(gold_url)
+    gold_sid = int(
+        sample["evidence_sentence_id"]
+    )
 
-        # Bỏ qua NOT ENOUGH INFO hoặc mẫu thiếu bằng chứng bài viết vàng rõ ràng
-        if label == "NOT ENOUGH INFO" or not gold_page:
-            idx += 1
+    for doc in retrieved_docs:
+
+        page = clean_wiki_title(
+            getattr(doc, "source", "")
+        )
+
+        if page != gold_page:
             continue
-            
-        print(f"\n[{processed+1}/{samples}] CLAIM: {claim}")
-        print(f"  |-- NHAN VANG (PAGE): {gold_page}")
-        
-        try:
-            # 1. Gọi trực tiếp bộ query_builder độc lập
-            topics = query_builder.extract_topics(claim)
-            
-            # 2. Xử lý Entity Boosting độc lập nếu có nlp
-            entity_links = []
-            if nlp and entity_linker:
-                doc = nlp(claim)
-                mentions = entity_linker.extract_mentions(doc)
-                for m in mentions:
-                    linked = entity_linker.link(m)
-                    if linked: entity_links.append(linked)
-            
-            # 3. Gọi retrieval_service tìm trang kiếm được
-            evidences = retrieval_service.retrieve(topics=topics, entity_links=entity_links)
-            if not evidences:
-                print("  |-- ⚠️ Retrieval Miss (Khong tim thay trang)")
-                idx += 1
-                processed += 1
-                continue
-            
-            # 4. Rerank tài liệu bằng ranking_service
-            scored_documents = await ranking_service.rank_evidence(claim, evidences)
-            scored_documents = sorted(scored_documents, key=lambda x: x.final_score, reverse=True)
-            top_evidences = [e.evidence for e in scored_documents[:5]]
-            
-            # 🔥 5. CHẠY RIÊNG THẰNG SENTENCE_SELECTOR CẦN ĐÁNH GIÁ
-            sentence_evidences = sentence_selector.select(
-                claim=claim,
-                evidences=top_evidences,
-                top_n=3
-            )
-            
-            # 6. Đánh giá dựa trên việc chọn trúng bài viết vàng (Page-level alignment)
-            any_sentence_correct = False
-            print("  |-- Cac cau Selector boc len:")
-            for r_idx, ev in enumerate(sentence_evidences):
-                clean_txt = ev.text.encode('ascii', 'ignore').decode('ascii')
-                retrieved_page = clean_wiki_title(ev.source)
-                
-                print(f"      [{r_idx+1}] Score: {ev.score:.2f} | Source: {retrieved_page}")
-                print(f"          Content: {clean_txt[:95]}...")
-                
-                # CHẤM ĐIỂM CHUẨN: Nếu câu bốc ra nằm đúng trong trang Wiki vàng
-                # HOẶC trúng từ khóa cốt lõi thông qua fallback => Tính là HIT!
-                if retrieved_page == gold_page or is_keyword_fallback_match(ev.text, claim):
-                    any_sentence_correct = True
-            
-            total_valid += 1
-            if any_sentence_correct:
-                selector_hit += 1
-                print("  ➔ 🎯 RESULT: SELECTOR HIT! (Boc dung ngu canh/bai viet)")
-            else:
-                print("  ➔ ❌ RESULT: SELECTOR MISS! (Cau bi lech ngu canh hoan toan)")
-                
-            processed += 1
-            sys.stdout.flush()
-            await asyncio.sleep(0.1)
-            
-        except Exception as e:
-            print(f"  |-- 💥 Error tai mau [{idx}]: {str(e)}")
-            traceback.print_exc()
-            
-        idx += 1
-        
-    # --- BÁO CÁO ĐỊNH LƯỢNG THỰC TẾ ---
-    if total_valid == 0: return
-    print("\n" + "="*20 + " SENTENCE SELECTOR ACCURACY REPORT " + "="*20)
-    print(f"Tong so mau Claims kiem tra hop le : {total_valid}")
-    print(f"So lan Selector chon trung context : {selector_hit}")
-    print(f"👉 DO CHINH XAC THUC TE (Accuracy) : {selector_hit / total_valid * 100:.2f}%")
-    print("=" * 75)
 
+        sentences = sentence_selector.clean_and_split(
+            doc.text
+        )
+
+        if gold_sid < len(sentences):
+            return sentences[gold_sid]
+
+    return None
+
+
+# ==========================================================
+# Single Sample
+# ==========================================================
+
+async def evaluate_sample(sample):
+    print("\n" + "=" * 100)
+    print("[START]")
+    
+    claim = sample["claim"]
+    print(f"DEBUG: Processing claim: {claim[:120]}")
+
+    try:
+
+        # ----------------------------------
+        # Entity Linking
+        # ----------------------------------
+        print("DEBUG: Extracting topics and linking entities...")
+        topics = query_builder.extract_topics(
+            claim
+        )
+
+        entity_links = []
+
+        if nlp and entity_linker:
+
+            doc = nlp(claim)
+
+            mentions = entity_linker.extract_mentions(
+                doc
+            )
+
+            for m in mentions:
+
+                linked = entity_linker.link(m)
+
+                if linked:
+                    entity_links.append(
+                        linked
+                    )
+
+        # ----------------------------------
+        # Retrieval
+        # ----------------------------------
+        print("DEBUG: Starting retrieval step")
+
+        docs = retrieval_service.retrieve(
+            topics=topics,
+            entity_links=entity_links
+        )
+
+        if not docs:
+            return None
+
+
+        print(
+            f"Retrieved docs: {len(docs)}"
+        )
+
+        for i, d in enumerate(docs[:5]):
+
+            page = getattr(
+                d,
+                "source",
+                "unknown"
+            )
+
+            print(
+                f"  {i+1}. {page}"
+            )
+        # ----------------------------------
+        # Gold sentence
+        # ----------------------------------
+
+        gold_sentence = get_gold_sentence_text(
+            sample,
+            docs
+        )
+
+        if not gold_sentence:
+            print("DEBUG: Could not find gold sentence in retrieved docs")
+            return None
+        print(f"DEBUG: Gold sentence found: {gold_sentence[:100]}")
+        # ----------------------------------
+        # Rank Docs
+        # ----------------------------------
+        print("DEBUG: Ranking documents...")
+        ranked_docs = await ranking_service.rank_evidence(
+            claim,
+            docs
+        )
+
+        ranked_docs = sorted(
+            ranked_docs,
+            key=lambda x: x.final_score,
+            reverse=True
+        )
+
+        top_docs = [
+            x.evidence
+            for x in ranked_docs[:5]
+        ]
+        print(f"DEBUG: Top {len(top_docs)} documents after ranking")
+        # ----------------------------------
+        # Sentence Selection
+        # ----------------------------------
+        print("DEBUG: Selecting sentences from ranked docs...")
+        selected_sentences = sentence_selector.select(
+            claim=claim,
+            evidences=top_docs,
+            top_n=3
+        )
+
+        if not selected_sentences:
+            print("DEBUG: No sentences selected")
+            return None
+
+        pred_texts = [
+            ev.text
+            for ev in selected_sentences
+        ]
+        print(f"DEBUG: Selected {len(pred_texts)} sentences:")
+        for idx, txt in enumerate(pred_texts):
+            print(f"DEBUG: Selected sentence {idx+1}: {txt[:150]}")
+        # ----------------------------------
+        # Semantic Similarity
+        # ----------------------------------
+
+        gold_emb = sim_model.encode(
+            gold_sentence,
+            convert_to_tensor=True
+        )
+
+        pred_embs = sim_model.encode(
+            pred_texts,
+            convert_to_tensor=True
+        )
+
+        scores = util.cos_sim(
+            gold_emb,
+            pred_embs
+        )[0]
+
+        best_score = float(
+            scores.max().item()
+        )
+
+        semantic_hit = (
+            best_score >= 0.70
+        )
+        print(f"DEBUG: Semantic similarity score: {best_score}")
+        return {
+            "hit": semantic_hit,
+            "score": best_score,
+            "claim": claim,
+            "gold": gold_sentence,
+            "predicted": pred_texts
+        }
+
+    except Exception as e:
+
+        print(
+            f"[ERROR] {str(e)}"
+        )
+
+        traceback.print_exc()
+
+        return None
+
+
+# ==========================================================
+# Full Evaluation
+# ==========================================================
+
+async def run_test(
+    max_samples=100
+):
+
+    dataset = load_dataset(
+        "fever",
+        "v1.0"
+    )["labelled_dev"]
+
+    total = 0
+
+    semantic_hits = 0
+
+    similarity_sum = 0.0
+
+    fail_cases = []
+
+    for sample in dataset:
+
+        if sample["label"] == "NOT ENOUGH INFO":
+            continue
+
+        result = await evaluate_sample(
+            sample
+        )
+
+        if result is None:
+            continue
+
+        total += 1
+
+        similarity_sum += result["score"]
+
+        if result["hit"]:
+            semantic_hits += 1
+
+        else:
+
+            fail_cases.append(
+                result
+            )
+
+        if total >= max_samples:
+            break
+
+    print("\n")
+    print("=" * 80)
+
+    print(
+        f"Total Samples: {total}"
+    )
+
+    print(
+        f"Semantic Recall@3: "
+        f"{semantic_hits}/{total}"
+        f" = {semantic_hits/total:.4f}"
+    )
+
+    print(
+        f"Average Similarity: "
+        f"{similarity_sum/total:.4f}"
+    )
+
+    print("=" * 80)
+
+    print("\nTop Fail Cases\n")
+
+    for case in fail_cases[:10]:
+
+        print("-" * 80)
+
+        print(
+            "CLAIM:",
+            case["claim"]
+        )
+
+        print(
+            "\nGOLD:"
+        )
+
+        print(
+            case["gold"]
+        )
+
+        print(
+            "\nSELECTED:"
+        )
+
+        for s in case["predicted"]:
+
+            print("-", s)
+
+        print(
+            "\nBEST SCORE:",
+            round(
+                case["score"],
+                4
+            )
+        )
+
+        print("-" * 80)
+
+
+# ==========================================================
+# Main
+# ==========================================================
 
 if __name__ == "__main__":
-    asyncio.run(test_selector_quality(samples=100))
+
+    asyncio.run(
+        run_test(
+            max_samples=100
+        )
+    )

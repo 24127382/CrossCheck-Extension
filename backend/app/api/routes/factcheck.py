@@ -109,3 +109,47 @@ async def explain(request: ExplainRequest) -> ExplainResponse:
         traceback.print_exc()
         error_msg = f"{type(e).__name__}: {str(e)}"
         raise HTTPException(status_code=500, detail=error_msg)
+
+
+@router.post("/llm-check", response_model=FactCheckResponse)
+async def llm_check(request: ExplainRequest) -> FactCheckResponse:
+    """
+    Check claim directly with LLM without retrieval pipeline.
+    Perfect for quick verification using only LLM reasoning.
+    
+    Request:
+        - claim: The claim to check
+        
+    Response:
+        - verdict, confidence, summary từ LLM
+        - evidences: Trống (không có retrieval)
+    """
+    try:
+        print(f"\n[API] Received LLM-check request for: {request.claim[:100]}")
+        
+        # Call LLM directly with empty evidence list
+        llm_result = await llm_service.summarize(request.claim, [])
+        
+        print(f"[API] ✅ LLM check completed")
+        
+        response = FactCheckResponse(
+            claim=request.claim,
+            verdict=llm_result.get("verdict", "NOT_ENOUGH_INFO"),
+            confidence=llm_result.get("confidence", 0.0),
+            summary=llm_result.get("summary", ""),
+            evidences=[]  # Không có evidence vì chỉ dùng LLM
+        )
+        
+        # Lưu vào cache giống như /api/factcheck
+        cache_service.save(
+            claim=request.claim,
+            verdict=response.verdict,
+            confidence=response.confidence,
+            evidences=response.evidences
+        )
+        
+        return response
+        
+    except Exception as e:
+        print(f"[API] ❌ Error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))

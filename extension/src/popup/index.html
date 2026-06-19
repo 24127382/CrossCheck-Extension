@@ -23,6 +23,64 @@
             margin-bottom: 16px;
             color: #333;
         }
+        /* --- ĐOẠN CSS MỚI ĐƯỢC THÊM VÀO ĐÂY --- */
+        .input-form {
+            background: white;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 12px; /* Thêm tí margin cho đỡ dính vào card kết quả bên dưới nếu có */
+        }
+        .input-form textarea {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            font-family: inherit;
+            resize: vertical;
+        }
+        .input-form button {
+            width: 100%;
+            padding: 10px;
+            margin-top: 8px;
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+        }
+        /* ------------------------------------- */
+
+        .input-form {
+            background: white;
+            padding: 12px;
+            border-radius: 8px;
+            margin-bottom: 12px;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+        }
+
+        .button-group button {
+            flex: 1;
+            padding: 10px;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        #submitBtn {
+            background: #2196F3;  /* Blue for full fact-check */
+        }
+
+        #llmCheckBtn {
+            background: #FF9800;  /* Orange for LLM-only */
+        }
+
         .result-card {
             background: white;
             border-radius: 8px;

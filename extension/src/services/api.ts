@@ -9,7 +9,7 @@ export const apiService = {
       const response = await axios.post<FactCheckResponse>(
         `${API_BASE_URL}/api/factcheck`,
         request,
-        { timeout: 30000 }
+        { timeout: 200000 }
       );
       return response.data;
     } catch (error: any) {
@@ -25,7 +25,7 @@ export const apiService = {
       const response = await axios.post<ExplainResponse>(
         `${API_BASE_URL}/api/explain`,
         { claim },
-        { timeout: 30000 }
+        { timeout: 200000 }
       );
       return response.data;
     } catch (error: any) {
@@ -42,13 +42,29 @@ export const apiService = {
   async health(): Promise<{ status: string }> {
     try {
       const response = await axios.get(`${API_BASE_URL}/api/health`, {
-        timeout: 5000
+        timeout: 200000
       });
       return response.data;
     } catch (error) {
       throw new Error('Backend unavailable');
     }
   },
+
+  async llmCheck(claim: string): Promise<FactCheckResponse> {
+  try {
+    const response = await axios.post<FactCheckResponse>(
+      `${API_BASE_URL}/api/llm-check`,
+      { claim },
+      { timeout: 200000 }
+    );
+    return response.data;
+  } catch (error: any) {
+    if (error.code === 'ECONNREFUSED' || error.message.includes('ECONNREFUSED')) {
+      throw new Error('Backend unavailable');
+    }
+    throw error;
+  }
+}
 };
 
 
