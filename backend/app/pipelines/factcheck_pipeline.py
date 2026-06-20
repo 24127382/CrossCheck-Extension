@@ -24,8 +24,16 @@ class FactCheckPipeline:
                     claim=claim,
                     verdict=cached_result.verdict,
                     confidence=cached_result.confidence,
-                    summary=...,
-                    evidences=[...]
+                    summary=" ".join([e.text for e in cached_result.evidences]),
+                    evidences=[
+                        EvidenceSchema(
+                            source=e.source,
+                            stance=e.stance,
+                            score=e.score,
+                            text=e.text
+                        )
+                        for e in cached_result.evidences
+                    ]
                 )
             
             print(f"\n[Pipeline] Starting fact-check for: {claim[:100]}")
