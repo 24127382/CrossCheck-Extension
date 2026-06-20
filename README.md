@@ -176,7 +176,7 @@ Evaluation samples: 19,998
 ### Backend
 
 ```bash
-git clone [<repository>](https://github.com/24127382/CrossCheck-Extension)
+`git clone https://github.com/24127382/CrossCheck-Extension`
 
 cd backend
 
