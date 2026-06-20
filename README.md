@@ -1,115 +1,203 @@
-# Project Structure Documentation
+# CrossCheck Extension
 
-## Architecture Overview
+A browser extension for automatic fact-checking using hybrid retrieval and natural language inference.
 
-This is a **Fact-Checking Browser Extension** with three main components:
+---
 
-### 1. Extension (Frontend)
-Browser extension that detects selected text and sends fact-check requests.
+## Motivation
 
-```
-extension/
-├── manifest.json          # Extension configuration
-├── package.json          # Node dependencies
-├── vite.config.ts        # Build configuration
-├── public/               # Static assets
-├── src/
-│   ├── popup/           # Popup UI & results display
-│   ├── content/         # Content script (webpage injection)
-│   ├── background/      # Service worker (API calls, auth)
-│   ├── services/        # API, factcheck, storage services
-│   ├── types/           # TypeScript types
-│   └── utils/           # Helper functions
-```
+Misinformation spreads rapidly on the internet.
 
-**Flow**: User selects text → Extension detects → Sends to backend → Displays results
+This project explores how retrieval techniques and natural language inference can be combined to provide lightweight fact-checking directly inside the browser.
 
-### 2. Backend (API)
-FastAPI server that orchestrates the fact-checking pipeline.
+The goal is not only to build a usable browser extension, but also to investigate how retrieval quality affects downstream fact-checking performance.
 
-```
-backend/
-├── app/
-│   ├── api/             # Route handlers
-│   │   └── routes/      # factcheck, health, debug endpoints
-│   ├── core/            # Configuration, logging, constants
-│   ├── services/        # Orchestration layer
-│   │   ├── retrieval_service.py     # Find evidence
-│   │   ├── entailment_service.py    # NLI inference
-│   │   ├── llm_service.py           # Summarization
-│   │   ├── clip_service.py          # Multimodal
-│   │   └── ranking_service.py       # Evidence ranking
-│   ├── pipelines/       # factcheck_pipeline.py (main flow)
-│   ├── models/          # Model wrappers
-│   ├── schemas/         # Pydantic models
-│   └── main.py          # App entry point
-├── requirements.txt
-├── Dockerfile
-└── tests/
-```
+---
 
-**Pipeline Flow**:
-```
-Claim → Retrieve Evidence → Encode → Compute Entailment 
-→ Rank → Generate Verdict → Summarize → Response
+## Features
+
+* Highlight text directly on webpages.
+* Retrieve supporting evidence from Wikipedia.
+* Hybrid retrieval using lexical and semantic search.
+* Cross-Encoder evidence reranking.
+* Sentence-level evidence selection.
+* NLI-based verdict prediction.
+* Display verdicts inside the browser popup.
+* Provide evidence sentences and confidence scores.
+* Cache previous claims to reduce repeated inference.
+* Optional LLM inference for further analysis and explanation.
+
+---
+
+## System Architecture
+
+```text
+User Selection
+      ↓
+Browser Extension
+      ↓
+FastAPI Backend
+      ↓
+Topic Extraction
+      ↓
+Hybrid Retrieval
+      ↓
+Cross-Encoder Ranking
+      ↓
+Sentence Selection
+      ↓
+DeBERTa NLI
+      ↓
+Verdict + Evidence
 ```
 
-**Response Format**:
-```json
-{
-  "claim": "...",
-  "verdict": "REFUTED|SUPPORTED|NOT_ENOUGH_INFO|DISPUTED",
-  "confidence": 0.82,
-  "summary": "...",
-  "evidences": [
-    {"source": "Reuters", "stance": "contradicts", "score": 0.91}
-  ]
-}
+---
+
+## Project Structure
+
+```text
+crosscheck-extension/
+│
+├── backend/
+│   ├── app/
+│   │   ├── api/
+│   │   ├── core/
+│   │   ├── pipelines/
+│   │   ├── services/
+│   │   ├── schemas/
+│   │   └── main.py
+│   │
+│   ├── tests/
+│   │   ├── retrieval_test.py
+│   │   └── nli_test.py
+│   │
+│   └── requirements.txt
+│
+├── extension/
+│   ├── src/
+│   │   ├── popup/
+│   │   ├── background/
+│   │   ├── content/
+│   │   ├── services/
+│   │   ├── types/
+│   │   └── utils/
+│   │
+│   └── package.json
+│
+├── ml/
+│   ├── evaluation/
+│   ├── experiments/
+│   └── kaggle/
+│
+└── README.md
 ```
 
-### 3. ML (Research & Development)
-Separate folder for experimentation and model evaluation.
+---
 
+## Fact-Checking Pipeline
+
+1. Topic Extraction
+2. Entity Linking
+3. Hybrid Retrieval
+4. Cross-Encoder Ranking
+5. Sentence Selection
+6. NLI Prediction
+7. Confidence Calibration
+8. Claim Caching
+
+---
+
+## Experiments
+
+Several retrieval and inference strategies were investigated during development.
+
+### Retrieval Experiments
+
+* BM25 retrieval
+* Dense retrieval
+* Entity-based retrieval
+* Hybrid retrieval
+* Graph-based retrieval
+
+### Evaluation Tasks
+
+* Recall@k evaluation
+* Mean Reciprocal Rank (MRR)
+* End-to-end fact-check accuracy
+* Evidence quality analysis
+
+### Experimental Environment
+
+Experiments and benchmarks are executed independently inside the `ml/` directory and Kaggle notebooks.
+
+---
+
+## Evaluation
+
+### Retrieval Performance
+
+| Metric   | Score |
+| -------- | ----- |
+| Recall@1 | 0.69  |
+| Recall@3 | 0.84  |
+| Recall@5 | 0.86  |
+| MRR      | 0.75  |
+
+### End-to-End Performance
+
+| Metric   | Score |
+| -------- | ----- |
+| Accuracy | 0.41  |
+| F1 Score | 0.395 |
+
+---
+
+## Installation
+
+### Backend
+
+```bash
+git clone <repository>
+
+cd backend
+
+pip install -r requirements.txt
+
+uvicorn app.main:app --reload
 ```
-ml/
-├── experiments/         # Different approaches
-│   ├── fever_baseline/
-│   ├── entailment_eval/
-│   └── clip_similarity/
-├── notebooks/          # Jupyter analysis
-├── evaluation/         # Metrics & benchmarking
-├── datasets/           # Training data
-├── checkpoints/        # Model weights
-└── training/           # Training scripts
+
+### Extension
+
+```bash
+cd extension
+
+npm install
+
+npm run build
 ```
 
-### 4. Infrastructure
-Deployment and orchestration configs.
+Load the generated extension inside the browser developer mode.
 
-```
-infra/
-├── docker/        # Service Dockerfiles
-├── compose/       # docker-compose.yml
-├── nginx/         # Reverse proxy config
-└── mlflow/        # ML tracking
-```
+---
 
-### 5. Data
-Data management and caching.
+## Limitations
 
-```
-data/
-├── raw/           # Original datasets
-├── processed/     # Cleaned data
-├── cache/         # Runtime cache
-└── demo/          # Test data
-```
+* Retrieval quality strongly affects final predictions.
+* Wikipedia may not contain evidence for recent events.
+* Multi-hop reasoning is not supported.
+* Confidence calibration remains imperfect.
+* The system is currently limited to English claims.
 
-## Key Design Decisions
+---
 
-✅ **Separation of concerns**: Extension, backend, and ML are independently scalable
-✅ **Modular services**: Each step in the pipeline is a separate service
-✅ **Clean schema**: Pydantic models ensure data consistency
-✅ **Easy evaluation**: ML folder is decoupled from production
-✅ **Model flexibility**: Easy to swap models without breaking the pipeline
-✅ **Clear API contract**: Consistent response format for UI and evaluation
+## Future Work
+
+* Larger retrieval corpora.
+* Multi-hop retrieval.
+* Knowledge graph integration.
+* LLM-based evidence summarization.
+* Human feedback loop.
+* Deployment and scalability improvements.
+* Better confidence calibration.
+
+---
