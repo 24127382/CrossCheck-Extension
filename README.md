@@ -134,7 +134,7 @@ Experiments and benchmarks are executed independently inside the `ml/` directory
 
 ## Evaluation
 
-## Model Evaluation
+### Model Evaluation
 
 The NLI component was evaluated independently on the FEVER v1.0 dataset.
 
