@@ -134,6 +134,25 @@ Experiments and benchmarks are executed independently inside the `ml/` directory
 
 ## Evaluation
 
+## Model Evaluation
+
+The NLI component was evaluated independently on the FEVER v1.0 dataset.
+
+| Label | Precision | Recall | F1 |
+|------|----------:|-------:|---:|
+| SUPPORTS | 0.81 | 0.88 | 0.84 |
+| REFUTES | 0.70 | 0.69 | 0.69 |
+| NOT_ENOUGH_INFO | 0.81 | 0.75 | 0.78 |
+
+| Overall Metric | Score |
+|---------------|------:|
+| Accuracy | 0.77 |
+| Macro F1 | 0.77 |
+| Weighted F1 | 0.77 |
+
+Dataset: FEVER v1.0  
+Evaluation samples: 19,998
+
 ### Retrieval Performance
 
 | Metric   | Score |
@@ -157,7 +176,7 @@ Experiments and benchmarks are executed independently inside the `ml/` directory
 ### Backend
 
 ```bash
-git clone <repository>
+git clone [<repository>](https://github.com/24127382/CrossCheck-Extension)
 
 cd backend
 
